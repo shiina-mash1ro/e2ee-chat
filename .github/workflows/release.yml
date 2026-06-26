@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.1.0. Leave empty to use a timestamp tag."
+        required: false
+        type: string
+      prerelease:
+        description: "Mark this release as a prerelease"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: server/go.mod
+
+      - name: Install frontend dependencies
+        working-directory: ui
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: ui
+        run: npm run build
+
+      - name: Test server
+        working-directory: server
+        run: go test -v -timeout 20s ./...
+
+      - name: Build release package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf dist/e2ee-chat-deploy
+          mkdir -p dist/e2ee-chat-deploy/bin
+
+          cp -r server/static dist/e2ee-chat-deploy/static
+          cp README.md dist/e2ee-chat-deploy/
+          cp deploy/README.deploy.md dist/e2ee-chat-deploy/
+          cp deploy/start.sh dist/e2ee-chat-deploy/
+          cp deploy/start.ps1 dist/e2ee-chat-deploy/
+
+          (
+            cd server
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/e2ee-chat-deploy/e2ee-chat .
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/e2ee-chat-deploy/bin/e2ee-chat-windows-amd64.exe .
+          )
+
+          chmod +x dist/e2ee-chat-deploy/e2ee-chat dist/e2ee-chat-deploy/start.sh
+
+          (
+            cd dist
+            zip -r e2ee-chat-deploy.zip e2ee-chat-deploy
+            tar -czf e2ee-chat-deploy.tar.gz e2ee-chat-deploy
+          )
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag }}"
+          if [ -z "$tag" ]; then
+            tag="v$(date -u +'%Y%m%d-%H%M%S')"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_tag.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          prerelease_flag=()
+          if [ "$PRERELEASE" = "true" ]; then
+            prerelease_flag=(--prerelease)
+          fi
+
+          notes="Built from ${GITHUB_SHA}.
+
+Artifacts:
+- e2ee-chat-deploy.zip
+- e2ee-chat-deploy.tar.gz"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz --clobber
+          else
+            gh release create "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz \
+              --target "$GITHUB_SHA" \
+              --title "$TAG" \
+              --notes "$notes" \
+              "${prerelease_flag[@]}"
+          fi
