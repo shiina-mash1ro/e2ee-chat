@@ -63,6 +63,9 @@
               <div class="room-actions">
                 <n-button class="mobile-only" size="small" @click="memberDrawerVisible = true">成员</n-button>
                 <n-button class="mobile-only" size="small" @click="detailVisible = true">详情</n-button>
+                <n-button size="small" :type="notificationsEnabled ? 'primary' : 'default'" @click="toggleNotifications">
+                  {{ notificationButtonText }}
+                </n-button>
                 <n-button class="desktop-only" size="small" @click="copyInvite">复制邀请链接</n-button>
                 <n-button class="desktop-only" size="small" @click="copySafety">复制安全码</n-button>
               </div>
@@ -145,7 +148,10 @@
                 <n-scrollbar class="peer-scroll">
                   <n-list hoverable clickable>
                     <n-list-item>
-                      <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`" />
+                      <div class="member-row">
+                        <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
+                        <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`" />
+                      </div>
                     </n-list-item>
                     <n-list-item
                       v-for="peer in sortedPeers"
@@ -153,7 +159,10 @@
                       :class="{ active: selectedPeer === peer.id }"
                       @click="selectPeer(peer.id)"
                     >
-                      <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发安全码 ${pairSafetyNumber(peer.publicKey)}`" />
+                      <div class="member-row">
+                        <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
+                        <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发安全码 ${pairSafetyNumber(peer.publicKey)}`" />
+                      </div>
                     </n-list-item>
                   </n-list>
                 </n-scrollbar>
@@ -167,25 +176,29 @@
                       :key="message.id"
                       class="message"
                       :class="{ mine: message.mine, private: message.privateTo, system: message.system }"
+                      :style="message.system ? null : messageStyle(message)"
                     >
                       <template v-if="message.system">
                         {{ message.text }}
                       </template>
                       <template v-else>
-                        <div class="byline">{{ messageLabel(message) }}</div>
-                        <div v-if="message.text" class="text">{{ message.text }}</div>
-                        <div v-if="message.file" class="attachment">
-                          <img
-                            v-if="isImageFile(message.file)"
-                            class="attachment-image"
-                            :src="fileDataUrl(message.file)"
-                            :alt="message.file.name"
-                          />
-                          <a class="attachment-link" :href="fileDataUrl(message.file)" :download="message.file.name">
-                            <span>{{ isImageFile(message.file) ? "查看/下载图片" : "下载文件" }}</span>
-                            <strong>{{ message.file.name }}</strong>
-                            <em>{{ formatBytes(message.file.size) }}</em>
-                          </a>
+                        <span class="avatar message-avatar" :style="userVisual(message.from).avatarStyle">{{ userVisual(message.from).avatar }}</span>
+                        <div class="message-bubble">
+                          <div class="byline">{{ messageLabel(message) }}</div>
+                          <div v-if="message.text" class="text">{{ message.text }}</div>
+                          <div v-if="message.file" class="attachment">
+                            <img
+                              v-if="isImageFile(message.file)"
+                              class="attachment-image"
+                              :src="fileDataUrl(message.file)"
+                              :alt="message.file.name"
+                            />
+                            <a class="attachment-link" :href="fileDataUrl(message.file)" :download="message.file.name">
+                              <span>{{ isImageFile(message.file) ? "查看/下载图片" : "下载文件" }}</span>
+                              <strong>{{ message.file.name }}</strong>
+                              <em>{{ formatBytes(message.file.size) }}</em>
+                            </a>
+                          </div>
                         </div>
                       </template>
                     </article>
@@ -240,7 +253,10 @@
                   </n-button>
                   <n-list hoverable clickable>
                     <n-list-item>
-                      <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`" />
+                      <div class="member-row">
+                        <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
+                        <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`" />
+                      </div>
                     </n-list-item>
                     <n-list-item
                       v-for="peer in sortedPeers"
@@ -248,7 +264,10 @@
                       :class="{ active: selectedPeer === peer.id }"
                       @click="selectPeer(peer.id)"
                     >
-                      <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发安全码 ${pairSafetyNumber(peer.publicKey)}`" />
+                      <div class="member-row">
+                        <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
+                        <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发安全码 ${pairSafetyNumber(peer.publicKey)}`" />
+                      </div>
                     </n-list-item>
                   </n-list>
                 </div>
@@ -263,7 +282,7 @@
 
 <script setup>
 import sodium from "libsodium-wrappers";
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 const roomId = ref("");
 const roomSecret = ref(null);
@@ -292,9 +311,23 @@ const nameModalVisible = ref(false);
 const codeBusy = ref(false);
 const memberDrawerVisible = ref(false);
 const detailVisible = ref(false);
+const notificationsEnabled = ref(notificationSupported() && localStorage.getItem("e2ee-chat-notifications") === "1" && Notification.permission === "granted");
+const notificationPermission = ref(notificationSupported() ? Notification.permission : "unsupported");
+const windowFocused = ref(typeof document === "undefined" ? true : document.hasFocus());
 let messageSeq = 0;
 const maxFileBytes = 20 * 1024 * 1024;
-
+const userPalette = [
+  { color: "#176b87", background: "#e7f5f8", border: "#9ed7e1" },
+  { color: "#7a4e10", background: "#fff2d8", border: "#e9c46a" },
+  { color: "#8f3f63", background: "#fbe8f0", border: "#e7a1bd" },
+  { color: "#2f6f3e", background: "#e8f5ec", border: "#9bd0a7" },
+  { color: "#6f4bb8", background: "#f0ebff", border: "#c4b5fd" },
+  { color: "#a4431e", background: "#ffede5", border: "#f0aa83" },
+  { color: "#29639f", background: "#e8f1fb", border: "#9bbfe5" },
+  { color: "#5d6b12", background: "#f2f5d8", border: "#c5d36c" },
+  { color: "#0f766e", background: "#e1f5f2", border: "#8bd4ca" },
+  { color: "#9a3412", background: "#fff0df", border: "#f2b279" },
+];
 const emojiList = [
   "😀", "😄", "😂", "🤣", "😊", "😍", "😘", "😎", "🤔", "😭", "😅", "😡",
   "👍", "👎", "🙏", "👏", "🙌", "🤝", "👀", "💪", "👌", "✌️", "🤞", "🫡",
@@ -307,6 +340,10 @@ const canSubmit = computed(() => canSend.value && (Boolean(draft.value.trim()) |
 const validJoinCode = computed(() => isValidCode(joinCode.value));
 const validCustomCode = computed(() => isValidCode(customCode.value));
 const sortedPeers = computed(() => [...peers.value.entries()].sort().map(([id, peer]) => ({ id, ...peer })));
+const notificationButtonText = computed(() => {
+  if (!notificationSupported()) return "通知不可用";
+  return notificationsEnabled.value ? "通知开" : "通知关";
+});
 
 sodium.ready.then(() => {
   cryptoReady.value = true;
@@ -316,6 +353,16 @@ sodium.ready.then(() => {
 onBeforeUnmount(() => {
   source.value?.close();
   revokeSelectedFileUrl();
+  window.removeEventListener("focus", updateWindowFocus);
+  window.removeEventListener("blur", updateWindowFocus);
+  document.removeEventListener("visibilitychange", updateWindowFocus);
+});
+
+onMounted(() => {
+  updateWindowFocus();
+  window.addEventListener("focus", updateWindowFocus);
+  window.addEventListener("blur", updateWindowFocus);
+  document.addEventListener("visibilitychange", updateWindowFocus);
 });
 
 function boot() {
@@ -650,12 +697,12 @@ function receiveGroupMessage(event) {
   );
   const payload = JSON.parse(sodium.to_string(plaintext));
   addMessage({ from: event.from, text: payload.text || "", file: payload.file, mine: event.from === deviceId.value });
+  if (event.from !== deviceId.value) notifyIncomingMessage();
 }
 
 function receivePrivateMessage(event) {
   if (event.from === deviceId.value) return;
   if (event.to !== deviceId.value) {
-    addSystemMessage(`收到一条发给 ${shortId(event.to)} 的不可读私信`);
     return;
   }
   const peer = peers.value.get(event.from);
@@ -668,6 +715,7 @@ function receivePrivateMessage(event) {
   const plaintext = sodium.crypto_box_open_easy(ciphertext, nonce, peer.publicKey, keyPair.value.privateKey);
   const payload = JSON.parse(sodium.to_string(plaintext));
   addMessage({ from: event.from, text: payload.text || "", file: payload.file, privateTo: deviceId.value, mine: false });
+  notifyIncomingMessage();
 }
 
 async function postEvent(payload) {
@@ -778,6 +826,61 @@ function messageLabel(message) {
   return `${displayNameFor(message.from)} 群聊`;
 }
 
+function messageStyle(message) {
+  const visual = userVisual(message.from);
+  return {
+    "--user-color": visual.color,
+    "--user-bg": visual.background,
+    "--user-border": visual.border,
+  };
+}
+
+function userVisual(id) {
+  const hash = hashString(id || "unknown");
+  const palette = paletteForUser(id, hash);
+  return {
+    ...palette,
+    avatar: avatarLabel(id),
+    avatarStyle: {
+      color: "#fff",
+      background: palette.color,
+      borderColor: palette.border,
+    },
+  };
+}
+
+function avatarLabel(id) {
+  const name = cleanName(displayNameFor(id));
+  const first = Array.from(name || shortId(id) || "?")[0] || "?";
+  return /^[a-z]$/i.test(first) ? first.toUpperCase() : first;
+}
+
+function paletteForUser(id, fallbackHash) {
+  const knownIds = [deviceId.value, ...peers.value.keys()].filter(Boolean).sort();
+  const index = knownIds.indexOf(id);
+  if (index < 0) return userPalette[fallbackHash % userPalette.length];
+  if (index < userPalette.length) return userPalette[index];
+  return generatedUserColor(index);
+}
+
+function generatedUserColor(index) {
+  const hue = Math.round((index * 137.508 + 23) % 360);
+  return {
+    color: `hsl(${hue} 64% 28%)`,
+    background: `hsl(${hue} 76% 94%)`,
+    border: `hsl(${hue} 62% 72%)`,
+  };
+}
+
+function hashString(value) {
+  let hash = 2166136261;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
 async function copyInvite() {
   await navigator.clipboard.writeText(location.href);
   addSystemMessage("已复制邀请链接");
@@ -786,6 +889,54 @@ async function copyInvite() {
 async function copySafety() {
   await navigator.clipboard.writeText(safetyCode.value);
   addSystemMessage("已复制安全码");
+}
+
+async function toggleNotifications() {
+  if (!notificationSupported()) {
+    notice.value = "当前浏览器不支持系统通知。";
+    return;
+  }
+  if (notificationsEnabled.value) {
+    notificationsEnabled.value = false;
+    localStorage.removeItem("e2ee-chat-notifications");
+    return;
+  }
+
+  let permission = Notification.permission;
+  if (permission === "default") {
+    permission = await Notification.requestPermission();
+  }
+  notificationPermission.value = permission;
+  if (permission !== "granted") {
+    notificationsEnabled.value = false;
+    localStorage.removeItem("e2ee-chat-notifications");
+    notice.value = "系统通知权限未开启，无法发送浏览器通知。";
+    return;
+  }
+  notificationsEnabled.value = true;
+  localStorage.setItem("e2ee-chat-notifications", "1");
+}
+
+function notifyIncomingMessage() {
+  if (!notificationsEnabled.value || !notificationSupported() || Notification.permission !== "granted") return;
+  if (!document.hidden && windowFocused.value) return;
+  try {
+    new Notification("您收到一条信息", {
+      tag: `e2ee-chat-${roomId.value}`,
+      body: "",
+    });
+  } catch {
+    notificationsEnabled.value = false;
+    localStorage.removeItem("e2ee-chat-notifications");
+  }
+}
+
+function updateWindowFocus() {
+  windowFocused.value = typeof document === "undefined" ? true : document.hasFocus();
+}
+
+function notificationSupported() {
+  return typeof window !== "undefined" && "Notification" in window;
 }
 
 function showError(err) {
@@ -1095,6 +1246,33 @@ function shortId(id) {
   background: #f6f5ff;
 }
 
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.member-row :deep(.n-thing) {
+  min-width: 0;
+}
+
+.avatar {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 2px solid;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0;
+  user-select: none;
+}
+
 .room-detail {
   min-height: 0;
   overflow-y: auto;
@@ -1171,26 +1349,43 @@ function shortId(id) {
 
 .message {
   max-width: min(680px, 92%);
-  padding: 10px 12px;
-  border: 1px solid #d9dee8;
-  border-radius: 8px;
-  background: #fff;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   overflow-wrap: anywhere;
 }
 
 .message.mine {
   align-self: flex-end;
-  border-color: #b8ddd9;
-  background: #effaf8;
+  flex-direction: row-reverse;
 }
 
-.message.private {
-  border-color: #c9c5f2;
-  background: #f6f5ff;
+.message-bubble {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--user-border, #d9dee8);
+  border-left-width: 4px;
+  border-radius: 8px;
+  background: var(--user-bg, #fff);
+}
+
+.message.mine .message-bubble {
+  border-right-width: 4px;
+  border-left-width: 1px;
+}
+
+.message.private .message-bubble {
+  background: linear-gradient(0deg, rgb(246 245 255 / 0.68), rgb(246 245 255 / 0.68)), var(--user-bg, #fff);
+  box-shadow: inset 0 0 0 1px #c9c5f2;
+}
+
+.message-avatar {
+  margin-top: 2px;
 }
 
 .message.system {
   align-self: center;
+  display: block;
   max-width: 100%;
   color: var(--muted);
   background: transparent;
@@ -1200,8 +1395,9 @@ function shortId(id) {
 }
 
 .byline {
-  color: var(--muted);
+  color: var(--user-color, var(--muted));
   font-size: 12px;
+  font-weight: 600;
   margin-bottom: 4px;
 }
 
@@ -1328,7 +1524,7 @@ function shortId(id) {
 
   .room-heading strong {
     display: block;
-    max-width: calc(100vw - 156px);
+    max-width: calc(100vw - 228px);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
