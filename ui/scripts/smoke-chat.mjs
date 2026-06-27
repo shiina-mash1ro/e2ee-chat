@@ -19,6 +19,7 @@ try {
 async function runFullLinkSmoke() {
   const contextA = await browser.newContext();
   const contextB = await browser.newContext();
+  const contextC = await browser.newContext();
   try {
     const pageA = await contextA.newPage();
     await pageA.goto(baseURL, { waitUntil: "domcontentloaded" });
@@ -31,24 +32,31 @@ async function runFullLinkSmoke() {
     await pageB.goto(inviteURL, { waitUntil: "domcontentloaded" });
     await enterName(pageB, "Bob");
 
-    await assertChatWorks(pageA, pageB);
+    const pageC = await contextC.newPage();
+    await pageC.goto(inviteURL, { waitUntil: "domcontentloaded" });
+    await enterName(pageC, "Charlie");
+
+    await assertChatWorks(pageA, pageB, pageC);
 
     const result = {
       mode: "full-link",
       inviteURL,
       pageAMessages: await pageA.locator(".message").allTextContents(),
       pageBMessages: await pageB.locator(".message").allTextContents(),
+      pageCMessages: await pageC.locator(".message").allTextContents(),
     };
     console.log(JSON.stringify(result, null, 2));
   } finally {
     await contextA.close();
     await contextB.close();
+    await contextC.close();
   }
 }
 
 async function runCodeSmoke() {
   const contextA = await browser.newContext();
   const contextB = await browser.newContext();
+  const contextC = await browser.newContext();
   try {
     const pageA = await contextA.newPage();
     await pageA.goto(baseURL, { waitUntil: "domcontentloaded" });
@@ -65,7 +73,11 @@ async function runCodeSmoke() {
     await pageB.waitForURL(new RegExp(`/r/${code}#p=${code}`), { timeout: 30000 });
     await enterName(pageB, "Bob");
 
-    await assertChatWorks(pageA, pageB);
+    const pageC = await contextC.newPage();
+    await pageC.goto(inviteURL, { waitUntil: "domcontentloaded" });
+    await enterName(pageC, "Charlie");
+
+    await assertChatWorks(pageA, pageB, pageC);
 
     const result = {
       mode: "code",
@@ -73,24 +85,32 @@ async function runCodeSmoke() {
       inviteURL,
       pageAMessages: await pageA.locator(".message").allTextContents(),
       pageBMessages: await pageB.locator(".message").allTextContents(),
+      pageCMessages: await pageC.locator(".message").allTextContents(),
     };
     console.log(JSON.stringify(result, null, 2));
   } finally {
     await contextA.close();
     await contextB.close();
+    await contextC.close();
   }
 }
 
-async function assertChatWorks(pageA, pageB) {
+async function assertChatWorks(pageA, pageB, pageC) {
   await pageA.getByText("已连接").waitFor({ timeout: 10000 });
   await pageB.getByText("已连接").waitFor({ timeout: 10000 });
+  await pageC.getByText("已连接").waitFor({ timeout: 10000 });
 
-  await pageA.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).waitFor({ timeout: 10000 });
-  await pageB.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).waitFor({ timeout: 10000 });
+  await pageA.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).first().waitFor({ timeout: 10000 });
+  await pageB.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).first().waitFor({ timeout: 10000 });
+  await pageC.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).first().waitFor({ timeout: 10000 });
+  await pageA.locator(".members .avatar").nth(2).waitFor({ timeout: 10000 });
+  await pageB.locator(".members .avatar").nth(2).waitFor({ timeout: 10000 });
+  await pageC.locator(".members .avatar").nth(2).waitFor({ timeout: 10000 });
 
   await pageA.getByPlaceholder("输入消息").fill("hello from A group");
   await pageA.getByRole("button", { name: "发送群聊" }).click();
   await pageB.getByText("hello from A group").waitFor({ timeout: 10000 });
+  await pageC.getByText("hello from A group").waitFor({ timeout: 10000 });
 
   await pageA.locator('input[type="file"]').setInputFiles({
     name: "hello.txt",
@@ -103,6 +123,8 @@ async function assertChatWorks(pageA, pageB) {
   await pageB.getByPlaceholder("输入消息").fill("hello from B group");
   await pageB.getByRole("button", { name: "发送群聊" }).click();
   await pageA.getByText("hello from B group").waitFor({ timeout: 10000 });
+  await pageC.getByText("hello from B group").waitFor({ timeout: 10000 });
+  await assertDifferentSenderColors(pageC, "hello from A group", "hello from B group");
 
   await pageB.locator('input[type="file"]').setInputFiles({
     name: "pixel.png",
@@ -128,10 +150,31 @@ async function assertChatWorks(pageA, pageB) {
   await pageA.getByRole("button", { name: "发送群聊" }).click();
   await pageB.getByText(/pasted-image-|paste\\.png/).waitFor({ timeout: 10000 });
 
-  await pageA.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).click();
+  await pageA.locator(".members .n-list-item").filter({ hasText: "Bob" }).click();
   await pageA.getByPlaceholder("输入消息").fill("private from A to B");
   await pageA.getByRole("button", { name: /^私发给 / }).click();
   await pageB.getByText("private from A to B").waitFor({ timeout: 10000 });
+  await pageC.waitForTimeout(500);
+  if (await pageC.getByText("private from A to B").count()) {
+    throw new Error("third client should not see private message content");
+  }
+  if (await pageC.getByText(/不可读私信|private/i).count()) {
+    throw new Error("third client should not see private-message system hints");
+  }
+}
+
+async function assertDifferentSenderColors(page, firstText, secondText) {
+  const colors = await page.evaluate(({ firstText, secondText }) => {
+    function messageColor(text) {
+      const messages = [...document.querySelectorAll(".message")];
+      const message = messages.find((node) => node.textContent.includes(text));
+      return message ? getComputedStyle(message).getPropertyValue("--user-color").trim() : "";
+    }
+    return [messageColor(firstText), messageColor(secondText)];
+  }, { firstText, secondText });
+  if (!colors[0] || !colors[1] || colors[0] === colors[1]) {
+    throw new Error(`expected different sender colors, got ${colors.join(", ")}`);
+  }
 }
 
 async function enterName(page, name) {
