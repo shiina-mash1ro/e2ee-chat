@@ -103,11 +103,7 @@ jobs:
             prerelease_flag=(--prerelease)
           fi
 
-          notes="Built from ${GITHUB_SHA}.
-
-Artifacts:
-- e2ee-chat-deploy.zip
-- e2ee-chat-deploy.tar.gz"
+          notes=$(printf 'Built from %s.\n\nArtifacts:\n- e2ee-chat-deploy.zip\n- e2ee-chat-deploy.tar.gz' "$GITHUB_SHA")
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz --clobber
