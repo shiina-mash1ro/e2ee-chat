@@ -139,7 +139,7 @@ async function assertChatWorks(pageA, pageB, pageC) {
     const file = new File([bytes], "paste.png", { type: "image/png" });
     const item = new DataTransfer();
     item.items.add(file);
-    const input = document.querySelector('input[placeholder="输入消息"]');
+    const input = document.querySelector('textarea[placeholder="输入消息"], input[placeholder="输入消息"]');
     input.dispatchEvent(new ClipboardEvent("paste", {
       bubbles: true,
       cancelable: true,
