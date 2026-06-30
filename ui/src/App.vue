@@ -3,7 +3,13 @@
     <n-message-provider>
       <n-layout class="shell">
         <n-layout-content class="content">
-          <n-modal v-model:show="nameModalVisible" :mask-closable="false" preset="card" class="name-modal">
+          <n-modal
+            v-model:show="nameModalVisible"
+            :mask-closable="false"
+            preset="card"
+            class="name-modal"
+            :style="{ width: 'min(420px, calc(100vw - 32px))' }"
+          >
             <template #header>进入房间</template>
             <n-space vertical :size="14">
               <n-input
@@ -198,7 +204,14 @@
                         <span class="avatar message-avatar" :style="userVisual(message.from).avatarStyle">{{ userVisual(message.from).avatar }}</span>
                         <div class="message-bubble">
                           <div class="byline">{{ messageLabel(message) }}</div>
-                          <div v-if="message.text" class="text">{{ message.text }}</div>
+                          <div v-if="message.kind === 'code'" class="code-block">
+                            <div class="code-block-head">
+                              <span>代码</span>
+                              <n-button size="tiny" quaternary @click="copyCodeBlock(message.text)">复制</n-button>
+                            </div>
+                            <pre><code>{{ message.text }}</code></pre>
+                          </div>
+                          <div v-else-if="message.text" class="text">{{ message.text }}</div>
                           <div v-if="message.file" class="attachment">
                             <img
                               v-if="isImageFile(message.file)"
@@ -245,12 +258,15 @@
                   <n-input
                     v-model:value="draft"
                     :disabled="!canSend"
+                    type="textarea"
+                    :autosize="{ minRows: 1, maxRows: 6 }"
                     maxlength="4096"
                     placeholder="输入消息"
                     clearable
                     @paste="onMessagePaste"
-                    @keydown.enter.prevent="sendMessage"
+                    @keydown.enter.exact.prevent="sendMessage"
                   />
+                  <n-button attr-type="button" :disabled="!canSendCode" @click="sendCodeBlock">代码</n-button>
                   <n-button type="primary" attr-type="submit" :disabled="!canSubmit">
                     {{ selectedPeer ? `私发给 ${displayNameFor(selectedPeer)}` : "发送群聊" }}
                   </n-button>
@@ -366,6 +382,7 @@ const emojiList = [
 
 const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && source.value));
 const canSubmit = computed(() => canSend.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
+const canSendCode = computed(() => canSend.value && Boolean(draft.value) && !selectedFile.value);
 const validJoinCode = computed(() => isValidCode(joinCode.value));
 const validCustomCode = computed(() => isValidCode(customCode.value));
 const sortedPeers = computed(() => [...peers.value.entries()].sort().map(([id, peer]) => ({ id, ...peer })));
@@ -634,17 +651,34 @@ async function sendMessage() {
   if (!text && !file) return;
 
   try {
-    const payload = await makeMessagePayload(text, file);
-    if (selectedPeer.value) {
-      await sendPrivateMessage(selectedPeer.value, payload);
-    } else {
-      await sendGroupMessage(payload);
-    }
-    draft.value = "";
-    clearSelectedFile();
+    await sendPayload(await makeMessagePayload(text, file));
   } catch (err) {
     showError(err);
   }
+}
+
+async function sendCodeBlock() {
+  if (!draft.value || selectedFile.value) return;
+
+  try {
+    await sendPayload({
+      kind: "code",
+      text: draft.value,
+      sent_at: Date.now(),
+    });
+  } catch (err) {
+    showError(err);
+  }
+}
+
+async function sendPayload(payload) {
+  if (selectedPeer.value) {
+    await sendPrivateMessage(selectedPeer.value, payload);
+  } else {
+    await sendGroupMessage(payload);
+  }
+  draft.value = "";
+  clearSelectedFile();
 }
 
 async function makeMessagePayload(text, file) {
@@ -713,7 +747,7 @@ async function sendPrivateMessage(to, payload) {
     nonce: b64(nonce),
     ciphertext: b64(ciphertext),
   });
-  addMessage({ from: deviceId.value, text: payload.text || "", file: payload.file, privateTo: to, mine: true });
+  addMessage({ from: deviceId.value, kind: payload.kind, text: payload.text || "", file: payload.file, privateTo: to, mine: true });
 }
 
 function receiveGroupMessage(event) {
@@ -728,7 +762,7 @@ function receiveGroupMessage(event) {
     roomKey.value,
   );
   const payload = JSON.parse(sodium.to_string(plaintext));
-  addMessage({ from: event.from, text: payload.text || "", file: payload.file, mine: event.from === deviceId.value });
+  addMessage({ from: event.from, kind: payload.kind, text: payload.text || "", file: payload.file, mine: event.from === deviceId.value });
   if (event.from !== deviceId.value) notifyIncomingMessage();
 }
 
@@ -746,7 +780,7 @@ function receivePrivateMessage(event) {
   const ciphertext = sodium.from_base64(event.ciphertext, sodium.base64_variants.ORIGINAL);
   const plaintext = sodium.crypto_box_open_easy(ciphertext, nonce, peer.publicKey, keyPair.value.privateKey);
   const payload = JSON.parse(sodium.to_string(plaintext));
-  addMessage({ from: event.from, text: payload.text || "", file: payload.file, privateTo: deviceId.value, mine: false });
+  addMessage({ from: event.from, kind: payload.kind, text: payload.text || "", file: payload.file, privateTo: deviceId.value, mine: false });
   notifyIncomingMessage();
 }
 
@@ -931,6 +965,11 @@ async function copySafety() {
   addSystemMessage("已复制唯一码");
 }
 
+async function copyCodeBlock(text) {
+  await navigator.clipboard.writeText(text || "");
+  addSystemMessage("已复制代码块");
+}
+
 async function toggleNotifications() {
   if (!notificationSupported()) {
     notice.value = "当前浏览器不支持系统通知。";
@@ -1104,6 +1143,7 @@ function shortId(id) {
 <style scoped>
 .shell {
   height: 100vh;
+  height: 100dvh;
   background: var(--page-bg);
   overflow: hidden;
 }
@@ -1443,6 +1483,40 @@ function shortId(id) {
   box-shadow: inset 0 0 0 1px var(--private-border);
 }
 
+.code-block {
+  display: grid;
+  gap: 6px;
+}
+
+.code-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.code-block pre {
+  max-width: min(560px, calc(100vw - 116px));
+  max-height: 360px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-strong);
+  color: var(--text);
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.code-block code {
+  font: inherit;
+}
+
 .message-avatar {
   margin-top: 2px;
 }
@@ -1522,7 +1596,7 @@ function shortId(id) {
 
 .composer {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   gap: 10px;
   padding: 14px;
   border-top: 1px solid var(--border);
@@ -1561,6 +1635,7 @@ function shortId(id) {
   .content {
     width: 100%;
     height: 100vh;
+    height: 100dvh;
     margin: 0;
   }
 
@@ -1571,6 +1646,7 @@ function shortId(id) {
 
   .chat-grid {
     grid-template-columns: 1fr;
+    min-height: 0;
   }
 
   .room-header {
@@ -1617,10 +1693,16 @@ function shortId(id) {
     min-height: 0;
   }
 
+  .conversation {
+    min-height: 0;
+    overflow: hidden;
+  }
+
   .composer {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-columns: auto auto minmax(0, 1fr) auto;
     gap: 8px;
-    padding: 10px;
+    padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+    background: var(--surface);
   }
 
   .composer :deep(.n-button[type="submit"]) {
@@ -1651,6 +1733,7 @@ function shortId(id) {
 
   .home {
     min-height: 100vh;
+    min-height: 100dvh;
     margin: 0;
     border-radius: 0;
   }
