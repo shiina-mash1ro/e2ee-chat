@@ -23,7 +23,7 @@ async function runFullLinkSmoke() {
   try {
     const pageA = await contextA.newPage();
     await pageA.goto(baseURL, { waitUntil: "domcontentloaded" });
-    await pageA.getByRole("button", { name: "创建强密钥房间" }).click();
+    await pageA.getByRole("button", { name: "创建大力房间" }).click();
     await pageA.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
     await enterName(pageA, "Alice");
     const inviteURL = pageA.url();
@@ -100,9 +100,9 @@ async function assertChatWorks(pageA, pageB, pageC) {
   await pageB.getByText("已连接").waitFor({ timeout: 10000 });
   await pageC.getByText("已连接").waitFor({ timeout: 10000 });
 
-  await pageA.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).first().waitFor({ timeout: 10000 });
-  await pageB.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).first().waitFor({ timeout: 10000 });
-  await pageC.locator(".members .n-list-item").filter({ hasText: "私发安全码" }).first().waitFor({ timeout: 10000 });
+  await pageA.locator(".members .n-list-item").filter({ hasText: "私发唯一码" }).first().waitFor({ timeout: 10000 });
+  await pageB.locator(".members .n-list-item").filter({ hasText: "私发唯一码" }).first().waitFor({ timeout: 10000 });
+  await pageC.locator(".members .n-list-item").filter({ hasText: "私发唯一码" }).first().waitFor({ timeout: 10000 });
   await pageA.locator(".members .avatar").nth(2).waitFor({ timeout: 10000 });
   await pageB.locator(".members .avatar").nth(2).waitFor({ timeout: 10000 });
   await pageC.locator(".members .avatar").nth(2).waitFor({ timeout: 10000 });

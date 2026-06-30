@@ -1,5 +1,5 @@
 <template>
-  <n-config-provider>
+  <n-config-provider :theme="naiveTheme">
     <n-message-provider>
       <n-layout class="shell">
         <n-layout-content class="content">
@@ -19,11 +19,18 @@
           <n-card v-if="!roomId" class="home" :bordered="true">
             <n-space vertical :size="18">
               <div>
-                <h1>E2EE 临时群聊</h1>
-                <p>链接即权限，消息只在浏览器端加密和解密，服务端只转发密文。</p>
+                <h1>临时群聊</h1>
+                <p>链接即权限，服务端只负责转发消息。</p>
+              </div>
+              <div class="theme-control">
+                <span>深色模式</span>
+                <n-switch v-model:value="darkMode" size="small">
+                  <template #checked>开</template>
+                  <template #unchecked>关</template>
+                </n-switch>
               </div>
               <n-space>
-                <n-button type="primary" size="large" @click="createRoom">创建强密钥房间</n-button>
+                <n-button type="primary" size="large" @click="createRoom">创建大力房间</n-button>
                 <n-button size="large" :loading="codeBusy" @click="createCodeRoom">创建随机码房间</n-button>
               </n-space>
 
@@ -50,7 +57,7 @@
                 />
                 <n-button type="primary" attr-type="submit" :loading="codeBusy" :disabled="!validJoinCode">用群聊码加入</n-button>
               </n-form>
-              <p class="weak-note">群聊码支持旧数字码，或 4-32 位 A-Z 和 2-9 自定义码；完整邀请链接更安全。</p>
+              <p class="weak-note">群聊码支持旧数字码，或 4-32 位 A-Z 和 2-9 自定义码。</p>
             </n-space>
           </n-card>
 
@@ -66,8 +73,12 @@
                 <n-button size="small" :type="notificationsEnabled ? 'primary' : 'default'" @click="toggleNotifications">
                   {{ notificationButtonText }}
                 </n-button>
+                <n-switch v-model:value="darkMode" size="small">
+                  <template #checked>暗</template>
+                  <template #unchecked>亮</template>
+                </n-switch>
                 <n-button class="desktop-only" size="small" @click="copyInvite">复制邀请链接</n-button>
-                <n-button class="desktop-only" size="small" @click="copySafety">复制安全码</n-button>
+                <n-button class="desktop-only" size="small" @click="copySafety">复制唯一码</n-button>
               </div>
             </header>
 
@@ -75,7 +86,7 @@
               {{ notice }}
             </n-alert>
             <n-alert v-if="weakCodeMode" class="notice" type="warning" :bordered="false">
-              群聊码模式安全性较低；敏感内容请使用完整邀请链接房间。
+              群聊码模式只适合临时闲聊。
             </n-alert>
 
             <div class="meta">
@@ -96,7 +107,7 @@
                 <strong>{{ shortId(deviceId) }}</strong>
               </div>
               <div class="meta-pill">
-                <span>安全码</span>
+                <span>唯一码</span>
                 <strong>{{ safetyCode || "-" }}</strong>
               </div>
               <div class="meta-pill status">
@@ -123,17 +134,17 @@
                 />
                 <label>我的设备</label>
                 <strong>{{ shortId(deviceId) }}</strong>
-                <label>群聊安全码</label>
+                <label>群聊唯一码</label>
                 <strong>{{ safetyCode || "-" }}</strong>
                 <label>连接状态</label>
                 <strong>{{ connectionState }}</strong>
               </div>
               <div class="detail-actions">
                 <n-button @click="copyInvite">复制邀请链接</n-button>
-                <n-button @click="copySafety">复制安全码</n-button>
+                <n-button @click="copySafety">复制唯一码</n-button>
               </div>
               <p v-if="weakCodeMode" class="detail-note">
-                群聊码模式安全性较低；敏感内容请使用完整邀请链接房间。
+                群聊码模式只适合临时闲聊。
               </p>
             </section>
 
@@ -148,10 +159,11 @@
                 <n-scrollbar class="peer-scroll">
                   <n-list hoverable clickable>
                     <n-list-item>
-                      <div class="member-row">
-                        <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
-                        <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`" />
-                      </div>
+                      <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`">
+                        <template #avatar>
+                          <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
+                        </template>
+                      </n-thing>
                     </n-list-item>
                     <n-list-item
                       v-for="peer in sortedPeers"
@@ -159,10 +171,11 @@
                       :class="{ active: selectedPeer === peer.id }"
                       @click="selectPeer(peer.id)"
                     >
-                      <div class="member-row">
-                        <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
-                        <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发安全码 ${pairSafetyNumber(peer.publicKey)}`" />
-                      </div>
+                      <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发唯一码 ${pairSafetyNumber(peer.publicKey)}`">
+                        <template #avatar>
+                          <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
+                        </template>
+                      </n-thing>
                     </n-list-item>
                   </n-list>
                 </n-scrollbar>
@@ -253,10 +266,11 @@
                   </n-button>
                   <n-list hoverable clickable>
                     <n-list-item>
-                      <div class="member-row">
-                        <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
-                        <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`" />
-                      </div>
+                      <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`">
+                        <template #avatar>
+                          <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
+                        </template>
+                      </n-thing>
                     </n-list-item>
                     <n-list-item
                       v-for="peer in sortedPeers"
@@ -264,10 +278,11 @@
                       :class="{ active: selectedPeer === peer.id }"
                       @click="selectPeer(peer.id)"
                     >
-                      <div class="member-row">
-                        <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
-                        <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发安全码 ${pairSafetyNumber(peer.publicKey)}`" />
-                      </div>
+                      <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发唯一码 ${pairSafetyNumber(peer.publicKey)}`">
+                        <template #avatar>
+                          <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
+                        </template>
+                      </n-thing>
                     </n-list-item>
                   </n-list>
                 </div>
@@ -282,7 +297,8 @@
 
 <script setup>
 import sodium from "libsodium-wrappers";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { darkTheme } from "naive-ui";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const roomId = ref("");
 const roomSecret = ref(null);
@@ -311,6 +327,7 @@ const nameModalVisible = ref(false);
 const codeBusy = ref(false);
 const memberDrawerVisible = ref(false);
 const detailVisible = ref(false);
+const darkMode = ref(readInitialDarkMode());
 const notificationsEnabled = ref(notificationSupported() && localStorage.getItem("e2ee-chat-notifications") === "1" && Notification.permission === "granted");
 const notificationPermission = ref(notificationSupported() ? Notification.permission : "unsupported");
 const windowFocused = ref(typeof document === "undefined" ? true : document.hasFocus());
@@ -328,6 +345,18 @@ const userPalette = [
   { color: "#0f766e", background: "#e1f5f2", border: "#8bd4ca" },
   { color: "#9a3412", background: "#fff0df", border: "#f2b279" },
 ];
+const darkUserPalette = [
+  { color: "#7dd3fc", background: "#102837", border: "#1e7496" },
+  { color: "#facc6b", background: "#302613", border: "#8c661c" },
+  { color: "#f0a6c8", background: "#351c2a", border: "#9d4d72" },
+  { color: "#91d6a4", background: "#183021", border: "#3f8f55" },
+  { color: "#c4b5fd", background: "#28223f", border: "#7461c9" },
+  { color: "#f6ad86", background: "#351f16", border: "#a85c35" },
+  { color: "#9dccf5", background: "#172838", border: "#4f85b7" },
+  { color: "#d3dd7c", background: "#2a2f15", border: "#7f8d2a" },
+  { color: "#8de0d6", background: "#14302d", border: "#3b948b" },
+  { color: "#f7b981", background: "#352313", border: "#aa6a2a" },
+];
 const emojiList = [
   "😀", "😄", "😂", "🤣", "😊", "😍", "😘", "😎", "🤔", "😭", "😅", "😡",
   "👍", "👎", "🙏", "👏", "🙌", "🤝", "👀", "💪", "👌", "✌️", "🤞", "🫡",
@@ -340,10 +369,13 @@ const canSubmit = computed(() => canSend.value && (Boolean(draft.value.trim()) |
 const validJoinCode = computed(() => isValidCode(joinCode.value));
 const validCustomCode = computed(() => isValidCode(customCode.value));
 const sortedPeers = computed(() => [...peers.value.entries()].sort().map(([id, peer]) => ({ id, ...peer })));
+const naiveTheme = computed(() => (darkMode.value ? darkTheme : null));
 const notificationButtonText = computed(() => {
   if (!notificationSupported()) return "通知不可用";
   return notificationsEnabled.value ? "通知开" : "通知关";
 });
+
+watch(darkMode, applyTheme, { immediate: true });
 
 sodium.ready.then(() => {
   cryptoReady.value = true;
@@ -373,7 +405,7 @@ function boot() {
   document.title = parsedRoomId;
   const secret = readRoomSecret(parsedRoomId);
   if (!secret) {
-    notice.value = "缺少房间密钥，无法解密消息。请使用包含 #k=... 的完整邀请链接，或从首页输入群聊码加入。";
+    notice.value = "缺少房间信息，无法进入聊天。请使用包含 #k=... 的完整邀请链接，或从首页输入群聊码加入。";
     return;
   }
 
@@ -856,15 +888,23 @@ function avatarLabel(id) {
 }
 
 function paletteForUser(id, fallbackHash) {
+  const palette = darkMode.value ? darkUserPalette : userPalette;
   const knownIds = [deviceId.value, ...peers.value.keys()].filter(Boolean).sort();
   const index = knownIds.indexOf(id);
-  if (index < 0) return userPalette[fallbackHash % userPalette.length];
-  if (index < userPalette.length) return userPalette[index];
+  if (index < 0) return palette[fallbackHash % palette.length];
+  if (index < palette.length) return palette[index];
   return generatedUserColor(index);
 }
 
 function generatedUserColor(index) {
   const hue = Math.round((index * 137.508 + 23) % 360);
+  if (darkMode.value) {
+    return {
+      color: `hsl(${hue} 78% 76%)`,
+      background: `hsl(${hue} 38% 18%)`,
+      border: `hsl(${hue} 44% 42%)`,
+    };
+  }
   return {
     color: `hsl(${hue} 64% 28%)`,
     background: `hsl(${hue} 76% 94%)`,
@@ -888,7 +928,7 @@ async function copyInvite() {
 
 async function copySafety() {
   await navigator.clipboard.writeText(safetyCode.value);
-  addSystemMessage("已复制安全码");
+  addSystemMessage("已复制唯一码");
 }
 
 async function toggleNotifications() {
@@ -937,6 +977,19 @@ function updateWindowFocus() {
 
 function notificationSupported() {
   return typeof window !== "undefined" && "Notification" in window;
+}
+
+function readInitialDarkMode() {
+  if (typeof window === "undefined") return false;
+  const saved = localStorage.getItem("e2ee-chat-theme");
+  if (saved) return saved === "dark";
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
+}
+
+function applyTheme(enabled) {
+  if (typeof document === "undefined") return;
+  document.documentElement.dataset.theme = enabled ? "dark" : "light";
+  localStorage.setItem("e2ee-chat-theme", enabled ? "dark" : "light");
 }
 
 function showError(err) {
@@ -1076,6 +1129,15 @@ function shortId(id) {
   color: var(--muted);
 }
 
+.theme-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .join-code-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1090,9 +1152,9 @@ function shortId(id) {
   height: 100%;
   display: flex;
   flex-direction: column;
-  border: 1px solid #d9dee8;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
   overflow: hidden;
 }
 
@@ -1103,7 +1165,7 @@ function shortId(id) {
   gap: 16px;
   padding: 8px 18px;
   min-height: 56px;
-  border-bottom: 1px solid #d9dee8;
+  border-bottom: 1px solid var(--border);
 }
 
 .room-heading {
@@ -1147,7 +1209,7 @@ function shortId(id) {
   gap: 14px;
   overflow-x: auto;
   padding: 8px 18px;
-  border-bottom: 1px solid #d9dee8;
+  border-bottom: 1px solid var(--border);
 }
 
 .name-control {
@@ -1183,7 +1245,7 @@ function shortId(id) {
 }
 
 .meta-pill.status strong {
-  color: #0b7a75;
+  color: var(--status);
 }
 
 .chat-grid {
@@ -1194,9 +1256,9 @@ function shortId(id) {
 }
 
 .members {
-  border-right: 1px solid #d9dee8;
+  border-right: 1px solid var(--border);
   padding: 16px;
-  background: #fbfcfe;
+  background: var(--surface-subtle);
   min-width: 0;
   min-height: 0;
   display: grid;
@@ -1227,8 +1289,8 @@ function shortId(id) {
 }
 
 .members :deep(.n-list-item.active) {
-  box-shadow: inset 3px 0 0 #5a4fcf;
-  background: #f6f5ff;
+  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--active-bg);
 }
 
 .drawer-members {
@@ -1243,8 +1305,8 @@ function shortId(id) {
 }
 
 .drawer-members :deep(.n-list-item.active) {
-  box-shadow: inset 3px 0 0 #5a4fcf;
-  background: #f6f5ff;
+  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--active-bg);
 }
 
 .member-row {
@@ -1302,9 +1364,9 @@ function shortId(id) {
   gap: 12px 16px;
   align-items: center;
   padding: 14px;
-  border: 1px solid #d9dee8;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fbfcfe;
+  background: var(--surface-subtle);
 }
 
 .detail-list label {
@@ -1365,10 +1427,10 @@ function shortId(id) {
 .message-bubble {
   min-width: 0;
   padding: 10px 12px;
-  border: 1px solid var(--user-border, #d9dee8);
+  border: 1px solid var(--user-border, var(--border));
   border-left-width: 4px;
   border-radius: 8px;
-  background: var(--user-bg, #fff);
+  background: var(--user-bg, var(--surface));
 }
 
 .message.mine .message-bubble {
@@ -1377,8 +1439,8 @@ function shortId(id) {
 }
 
 .message.private .message-bubble {
-  background: linear-gradient(0deg, rgb(246 245 255 / 0.68), rgb(246 245 255 / 0.68)), var(--user-bg, #fff);
-  box-shadow: inset 0 0 0 1px #c9c5f2;
+  background: linear-gradient(0deg, var(--private-overlay), var(--private-overlay)), var(--user-bg, var(--surface));
+  box-shadow: inset 0 0 0 1px var(--private-border);
 }
 
 .message-avatar {
@@ -1414,9 +1476,9 @@ function shortId(id) {
   max-width: min(360px, 100%);
   max-height: 260px;
   border-radius: 8px;
-  border: 1px solid #d9dee8;
+  border: 1px solid var(--border);
   object-fit: contain;
-  background: #f7f8fb;
+  background: var(--surface-strong);
 }
 
 .attachment-link {
@@ -1424,10 +1486,10 @@ function shortId(id) {
   gap: 2px;
   color: inherit;
   text-decoration: none;
-  border: 1px solid #d9dee8;
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 9px 10px;
-  background: #fbfcfe;
+  background: var(--surface-subtle);
 }
 
 .attachment-link span,
@@ -1443,19 +1505,19 @@ function shortId(id) {
   justify-content: space-between;
   gap: 10px;
   padding: 8px 14px;
-  border-top: 1px solid #d9dee8;
+  border-top: 1px solid var(--border);
   color: var(--muted);
-  background: #fbfcfe;
+  background: var(--surface-subtle);
   font-size: 13px;
 }
 
 .selected-file-preview {
   width: 56px;
   height: 56px;
-  border: 1px solid #d9dee8;
+  border: 1px solid var(--border);
   border-radius: 8px;
   object-fit: cover;
-  background: #fff;
+  background: var(--surface);
 }
 
 .composer {
@@ -1463,7 +1525,7 @@ function shortId(id) {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
   gap: 10px;
   padding: 14px;
-  border-top: 1px solid #d9dee8;
+  border-top: 1px solid var(--border);
 }
 
 .file-input {
@@ -1482,16 +1544,17 @@ function shortId(id) {
 .emoji-grid button {
   width: 34px;
   height: 34px;
-  border: 1px solid #d9dee8;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
+  color: var(--text);
   cursor: pointer;
   font-size: 19px;
   line-height: 1;
 }
 
 .emoji-grid button:hover {
-  background: #f4f6fb;
+  background: var(--surface-strong);
 }
 
 @media (max-width: 640px) {

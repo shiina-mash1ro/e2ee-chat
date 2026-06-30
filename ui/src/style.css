@@ -3,6 +3,31 @@
   --page-bg: #f5f7fb;
   --text: #17202e;
   --muted: #667085;
+  --surface: #fff;
+  --surface-subtle: #fbfcfe;
+  --surface-strong: #f7f8fb;
+  --border: #d9dee8;
+  --accent: #5a4fcf;
+  --active-bg: #f6f5ff;
+  --private-overlay: rgb(246 245 255 / 0.68);
+  --private-border: #c9c5f2;
+  --status: #0b7a75;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page-bg: #111418;
+  --text: #e6eaf0;
+  --muted: #9aa4b2;
+  --surface: #181c22;
+  --surface-subtle: #1f242c;
+  --surface-strong: #242a33;
+  --border: #343b46;
+  --accent: #8b80ff;
+  --active-bg: #25233a;
+  --private-overlay: rgb(55 50 91 / 0.62);
+  --private-border: #635ca7;
+  --status: #5bd1c6;
 }
 
 * {
