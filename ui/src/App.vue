@@ -1088,8 +1088,8 @@ function shortId(id) {
 
 .chat {
   height: 100%;
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   border: 1px solid #d9dee8;
   border-radius: 8px;
   background: #fff;
@@ -1189,6 +1189,7 @@ function shortId(id) {
 .chat-grid {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -1274,6 +1275,7 @@ function shortId(id) {
 }
 
 .room-detail {
+  flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
   padding: 18px;
@@ -1502,14 +1504,10 @@ function shortId(id) {
   .chat {
     border: 0;
     border-radius: 0;
-    display: flex;
-    flex-direction: column;
   }
 
   .chat-grid {
     grid-template-columns: 1fr;
-    flex: 1 1 auto;
-    min-height: 0;
   }
 
   .room-header {
@@ -1595,8 +1593,6 @@ function shortId(id) {
   }
 
   .room-detail {
-    flex: 1 1 auto;
-    min-height: 0;
     padding: 14px 12px;
   }
 
