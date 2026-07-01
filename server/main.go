@@ -20,6 +20,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 const (
@@ -48,12 +51,26 @@ type Hub struct {
 }
 
 type Room struct {
-	clients map[string]*Client
+	sseClients map[string]*Client
+	wsClients  map[string]*Client
 }
 
 type Client struct {
 	id     string
 	events chan []byte
+}
+
+type wsEnvelope struct {
+	Type       string `msgpack:"type" json:"type"`
+	Room       string `msgpack:"room" json:"room"`
+	From       string `msgpack:"from" json:"from"`
+	To         string `msgpack:"to,omitempty" json:"to,omitempty"`
+	Protocol   int    `msgpack:"protocol,omitempty" json:"protocol,omitempty"`
+	MsgID      string `msgpack:"msg_id,omitempty" json:"msg_id,omitempty"`
+	AckID      string `msgpack:"ack_id,omitempty" json:"ack_id,omitempty"`
+	TransferID string `msgpack:"transfer_id,omitempty" json:"transfer_id,omitempty"`
+	Seq        int    `msgpack:"seq,omitempty" json:"seq,omitempty"`
+	Total      int    `msgpack:"total,omitempty" json:"total,omitempty"`
 }
 
 type RateLimiter struct {
@@ -158,18 +175,14 @@ func (h *Hub) addClient(roomID string, c *Client) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.rooms[roomID]
-	if room == nil {
-		room = &Room{clients: make(map[string]*Client)}
-		h.rooms[roomID] = room
-	}
-	if len(room.clients) >= maxClients {
+	room := h.roomLocked(roomID)
+	if len(room.sseClients)+len(room.wsClients) >= maxClients {
 		return errors.New("room is full")
 	}
-	if old := room.clients[c.id]; old != nil {
+	if old := room.sseClients[c.id]; old != nil {
 		close(old.events)
 	}
-	room.clients[c.id] = c
+	room.sseClients[c.id] = c
 	return nil
 }
 
@@ -181,13 +194,13 @@ func (h *Hub) removeClient(roomID, clientID string) bool {
 	if room == nil {
 		return false
 	}
-	c := room.clients[clientID]
+	c := room.sseClients[clientID]
 	if c == nil {
 		return false
 	}
-	delete(room.clients, clientID)
+	delete(room.sseClients, clientID)
 	close(c.events)
-	if len(room.clients) == 0 {
+	if len(room.sseClients)+len(room.wsClients) == 0 {
 		delete(h.rooms, roomID)
 	}
 	return true
@@ -197,14 +210,10 @@ func (h *Hub) broadcast(roomID string, msg []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.rooms[roomID]
-	if room == nil {
-		room = &Room{clients: make(map[string]*Client)}
-		h.rooms[roomID] = room
-	}
+	room := h.roomLocked(roomID)
 
 	var stale []string
-	for id, c := range room.clients {
+	for id, c := range room.sseClients {
 		select {
 		case c.events <- msg:
 		default:
@@ -212,10 +221,85 @@ func (h *Hub) broadcast(roomID string, msg []byte) {
 		}
 	}
 	for _, id := range stale {
-		close(room.clients[id].events)
-		delete(room.clients, id)
+		close(room.sseClients[id].events)
+		delete(room.sseClients, id)
 	}
-	if len(room.clients) == 0 {
+	if len(room.sseClients)+len(room.wsClients) == 0 {
+		delete(h.rooms, roomID)
+	}
+}
+
+func (h *Hub) roomLocked(roomID string) *Room {
+	room := h.rooms[roomID]
+	if room == nil {
+		room = &Room{
+			sseClients: make(map[string]*Client),
+			wsClients:  make(map[string]*Client),
+		}
+		h.rooms[roomID] = room
+	}
+	if room.sseClients == nil {
+		room.sseClients = make(map[string]*Client)
+	}
+	if room.wsClients == nil {
+		room.wsClients = make(map[string]*Client)
+	}
+	return room
+}
+
+func (h *Hub) addWSClient(roomID string, c *Client) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.roomLocked(roomID)
+	if len(room.sseClients)+len(room.wsClients) >= maxClients {
+		return errors.New("room is full")
+	}
+	if old := room.wsClients[c.id]; old != nil {
+		close(old.events)
+	}
+	room.wsClients[c.id] = c
+	return nil
+}
+
+func (h *Hub) removeWSClient(roomID, clientID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.rooms[roomID]
+	if room == nil {
+		return false
+	}
+	c := room.wsClients[clientID]
+	if c == nil {
+		return false
+	}
+	delete(room.wsClients, clientID)
+	close(c.events)
+	if len(room.sseClients)+len(room.wsClients) == 0 {
+		delete(h.rooms, roomID)
+	}
+	return true
+}
+
+func (h *Hub) broadcastWS(roomID string, msg []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.roomLocked(roomID)
+	var stale []string
+	for id, c := range room.wsClients {
+		select {
+		case c.events <- msg:
+		default:
+			stale = append(stale, id)
+		}
+	}
+	for _, id := range stale {
+		close(room.wsClients[id].events)
+		delete(room.wsClients, id)
+	}
+	if len(room.sseClients)+len(room.wsClients) == 0 {
 		delete(h.rooms, roomID)
 	}
 }
@@ -370,6 +454,8 @@ func (h *Hub) apiHandler(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && tail == "events":
 		h.eventsHandler(w, r, roomID)
+	case r.Method == http.MethodGet && tail == "ws":
+		h.wsHandler(w, r, roomID)
 	case r.Method == http.MethodPost && tail == "messages":
 		h.messagesHandler(w, r, roomID)
 	default:
@@ -485,9 +571,167 @@ func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID str
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
+	clientID := r.URL.Query().Get("client_id")
+	if !clientIDRe.MatchString(clientID) {
+		http.Error(w, "invalid client id", http.StatusBadRequest)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: []string{"*"},
+	})
+	if err != nil {
+		log.Printf("websocket accept failed: %v", err)
+		return
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	conn.SetReadLimit(maxBodyBytes)
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	client := &Client{id: clientID, events: make(chan []byte, clientBufSize)}
+	if err := h.addWSClient(roomID, client); err != nil {
+		conn.Close(websocket.StatusTryAgainLater, err.Error())
+		return
+	}
+	defer func() {
+		removed := h.removeWSClient(roomID, clientID)
+		if removed {
+			leave := wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 2}
+			if body, err := msgpack.Marshal(leave); err == nil {
+				h.broadcastWS(roomID, body)
+			}
+		}
+	}()
+
+	welcome := wsEnvelope{Type: "welcome", Room: roomID, From: "server", Protocol: 2}
+	if body, err := msgpack.Marshal(welcome); err == nil {
+		client.events <- body
+	}
+
+	go h.readWS(ctx, cancel, conn, roomID, client)
+
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg, ok := <-client.events:
+			if !ok {
+				return
+			}
+			if err := conn.Write(ctx, websocket.MessageBinary, msg); err != nil {
+				cancel()
+				return
+			}
+		case <-ticker.C:
+			ping := wsEnvelope{Type: "ping", Room: roomID, From: "server", Protocol: 2}
+			body, err := msgpack.Marshal(ping)
+			if err != nil {
+				continue
+			}
+			if err := conn.Write(ctx, websocket.MessageBinary, body); err != nil {
+				cancel()
+				return
+			}
+		}
+	}
+}
+
+func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *websocket.Conn, roomID string, client *Client) {
+	defer cancel()
+	for {
+		messageType, body, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		if messageType != websocket.MessageBinary {
+			continue
+		}
+
+		var event wsEnvelope
+		if err := msgpack.Unmarshal(body, &event); err != nil {
+			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2})
+			continue
+		}
+		if err := validateWSEvent(event, roomID, client.id); err != nil {
+			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2, AckID: event.MsgID})
+			continue
+		}
+
+		ackType := "server_ack"
+		if event.Type == "chunk" {
+			ackType = "chunk_ack"
+		}
+		if event.MsgID != "" {
+			enqueueWS(client, wsEnvelope{Type: ackType, Room: roomID, From: "server", Protocol: 2, AckID: event.MsgID})
+		}
+		h.broadcastWS(roomID, body)
+		log.Printf("ws broadcast room=%s type=%s", roomID, event.Type)
+	}
+}
+
+func enqueueWS(client *Client, event wsEnvelope) {
+	body, err := msgpack.Marshal(event)
+	if err != nil {
+		return
+	}
+	select {
+	case client.events <- body:
+	default:
+	}
+}
+
+func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
+	if event.Protocol != 2 {
+		return errors.New("invalid protocol")
+	}
+	if !validWSEventType(event.Type) {
+		return errors.New("invalid event type")
+	}
+	if event.Room != "" && event.Room != roomID {
+		return errors.New("room mismatch")
+	}
+	if event.From != "" && event.From != clientID {
+		return errors.New("sender mismatch")
+	}
+	if event.From != "" && !clientIDRe.MatchString(event.From) {
+		return errors.New("invalid sender")
+	}
+	if event.To != "" && !clientIDRe.MatchString(event.To) {
+		return errors.New("invalid recipient")
+	}
+	if requiresMsgID(event.Type) && event.MsgID == "" {
+		return errors.New("missing message id")
+	}
+	return nil
+}
+
 func validEventType(t string) bool {
 	switch t {
-	case "hello", "peer_hello", "group_msg", "private_msg":
+	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack":
+		return true
+	default:
+		return false
+	}
+}
+
+func validWSEventType(t string) bool {
+	switch t {
+	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "chunk":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresMsgID(t string) bool {
+	switch t {
+	case "group_msg", "private_msg", "chunk":
 		return true
 	default:
 		return false

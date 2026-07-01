@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func TestCodeRoomRateLimitByRemoteIP(t *testing.T) {
@@ -131,6 +136,75 @@ func TestJoinCodeRoomRejectsAmbiguousCode(t *testing.T) {
 	}
 }
 
+func TestWSRejectsInvalidClient(t *testing.T) {
+	h := newHub()
+	server := httptest.NewServer(http.HandlerFunc(h.apiHandler))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, err := websocket.Dial(ctx, wsURL(server.URL, "/api/rooms/testroom/ws?client_id=bad"), nil)
+	if err == nil {
+		t.Fatal("websocket dial succeeded with invalid client id")
+	}
+}
+
+func TestWSInvalidMessagePackReturnsServerError(t *testing.T) {
+	h := newHub()
+	server := httptest.NewServer(http.HandlerFunc(h.apiHandler))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	conn := dialWS(t, ctx, server.URL, "client_aaaaaaaa")
+	defer conn.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, ctx, conn, "welcome")
+
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte{0xc1}); err != nil {
+		t.Fatal(err)
+	}
+	readWSEvent(t, ctx, conn, "server_error")
+}
+
+func TestWSServerAckAndBroadcast(t *testing.T) {
+	h := newHub()
+	server := httptest.NewServer(http.HandlerFunc(h.apiHandler))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sender := dialWS(t, ctx, server.URL, "client_sender1")
+	defer sender.Close(websocket.StatusNormalClosure, "")
+	receiver := dialWS(t, ctx, server.URL, "client_receiver")
+	defer receiver.Close(websocket.StatusNormalClosure, "")
+	readWSEvent(t, ctx, sender, "welcome")
+	readWSEvent(t, ctx, receiver, "welcome")
+
+	outbound := wsEnvelope{
+		Type:     "group_msg",
+		Room:     "testroom",
+		From:     "client_sender1",
+		Protocol: 2,
+		MsgID:    "msg_1",
+	}
+	body, err := msgpack.Marshal(outbound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Write(ctx, websocket.MessageBinary, body); err != nil {
+		t.Fatal(err)
+	}
+
+	ack := readWSEvent(t, ctx, sender, "server_ack")
+	if ack.AckID != "msg_1" {
+		t.Fatalf("ack id = %q, want msg_1", ack.AckID)
+	}
+	seen := readWSEvent(t, ctx, receiver, "group_msg")
+	if seen.MsgID != "msg_1" || seen.From != "client_sender1" {
+		t.Fatalf("broadcast = %+v", seen)
+	}
+}
+
 func mustProofJSON(t *testing.T, h *Hub, ip string) string {
 	t.Helper()
 	challenge, payload, err := h.newPowChallenge(ip, "code")
@@ -147,5 +221,52 @@ func mustProofJSON(t *testing.T, h *Hub, ip string) string {
 			}
 			return string(body)
 		}
+	}
+}
+
+func dialWS(t *testing.T, ctx context.Context, serverURL, clientID string) *websocket.Conn {
+	t.Helper()
+	conn, _, err := websocket.Dial(ctx, wsURL(serverURL, "/api/rooms/testroom/ws?client_id="+clientID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+func readWSEvent(t *testing.T, ctx context.Context, conn *websocket.Conn, wantType string) wsEnvelope {
+	t.Helper()
+	for {
+		messageType, body, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if messageType != websocket.MessageBinary {
+			continue
+		}
+		var event wsEnvelope
+		if err := msgpack.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type == wantType {
+			return event
+		}
+	}
+}
+
+func wsURL(serverURL, path string) string {
+	return "ws" + strings.TrimPrefix(serverURL, "http") + path
+}
+
+func TestWSRejectsInvalidEventType(t *testing.T) {
+	err := validateWSEvent(wsEnvelope{Type: "bad", Room: "testroom", From: "client_sender1", Protocol: 2}, "testroom", "client_sender1")
+	if err == nil {
+		t.Fatal("invalid ws event type accepted")
+	}
+}
+
+func TestWSRejectsRoomMismatch(t *testing.T) {
+	err := validateWSEvent(wsEnvelope{Type: "hello", Room: "other", From: "client_sender1", Protocol: 2}, "testroom", "client_sender1")
+	if err == nil {
+		t.Fatal("room mismatch accepted")
 	}
 }

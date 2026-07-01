@@ -203,7 +203,10 @@
                       <template v-else>
                         <span class="avatar message-avatar" :style="userVisual(message.from).avatarStyle">{{ userVisual(message.from).avatar }}</span>
                         <div class="message-bubble">
-                          <div class="byline">{{ messageLabel(message) }}</div>
+                          <div class="byline">
+                            <span>{{ messageLabel(message) }}</span>
+                            <span v-if="message.status === 'failed'" class="message-status" :title="message.failureReason || '发送失败'">!</span>
+                          </div>
                           <div v-if="message.kind === 'code'" class="code-block">
                             <div class="code-block-head">
                               <span>代码</span>
@@ -312,6 +315,7 @@
 </template>
 
 <script setup>
+import { decode, encode } from "@msgpack/msgpack";
 import sodium from "libsodium-wrappers";
 import { darkTheme } from "naive-ui";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
@@ -323,7 +327,8 @@ const deviceId = ref("");
 const keyPair = ref(null);
 const peers = ref(new Map());
 const selectedPeer = ref("");
-const source = ref(null);
+const transport = ref(null);
+const transportMode = ref("");
 const notice = ref("");
 const safetyCode = ref("");
 const connectionState = ref("未连接");
@@ -349,6 +354,14 @@ const notificationPermission = ref(notificationSupported() ? Notification.permis
 const windowFocused = ref(typeof document === "undefined" ? true : document.hasFocus());
 let messageSeq = 0;
 const maxFileBytes = 20 * 1024 * 1024;
+const fallbackMaxFileBytes = 5 * 1024 * 1024;
+const wsConnectTimeoutMs = 3000;
+const textAckTimeoutMs = 5000;
+const chunkAckTimeoutMs = 15000;
+const chunkSize = 256 * 1024;
+const pendingMessages = new Map();
+const pendingServerAcks = new Map();
+const incomingTransfers = new Map();
 const userPalette = [
   { color: "#176b87", background: "#e7f5f8", border: "#9ed7e1" },
   { color: "#7a4e10", background: "#fff2d8", border: "#e9c46a" },
@@ -380,7 +393,7 @@ const emojiList = [
   "💡", "📌", "📎", "📷", "🖼️", "📄", "🔒", "🔑", "🚀", "☕", "🍻", "❓",
 ];
 
-const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && source.value));
+const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && transport.value));
 const canSubmit = computed(() => canSend.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
 const canSendCode = computed(() => canSend.value && Boolean(draft.value) && !selectedFile.value);
 const validJoinCode = computed(() => isValidCode(joinCode.value));
@@ -400,7 +413,8 @@ sodium.ready.then(() => {
 }).catch(showError);
 
 onBeforeUnmount(() => {
-  source.value?.close();
+  transport.value?.close();
+  clearPendingTimers();
   revokeSelectedFileUrl();
   window.removeEventListener("focus", updateWindowFocus);
   window.removeEventListener("blur", updateWindowFocus);
@@ -573,28 +587,152 @@ function deriveCodeSecret(code) {
 }
 
 function connectEvents() {
+  transport.value?.close();
+  transport.value = null;
+  transportMode.value = "";
+  connectionState.value = "连接中";
+
+  let settled = false;
+  let wsTransport = null;
+  const fallbackTimer = setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    wsTransport?.close();
+    startSSETransport();
+  }, wsConnectTimeoutMs);
+
+  wsTransport = createWebSocketTransport({
+    onReady: () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
+      transport.value = wsTransport;
+      transportMode.value = "ws";
+      connectionState.value = "已连接";
+      sendHello().catch(showError);
+    },
+    onFallback: () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
+      wsTransport?.close();
+      startSSETransport();
+    },
+    onEvent: dispatchWireEvent,
+    onState: (state) => {
+      if (!settled) connectionState.value = state;
+    },
+  });
+}
+
+function startSSETransport() {
+  const sseTransport = createSSETransport({
+    onOpen: () => {
+      transport.value = sseTransport;
+      transportMode.value = "sse";
+      connectionState.value = "已连接（兼容模式）";
+      sendHello().catch(showError);
+    },
+    onEvent: dispatchWireEvent,
+    onState: (state) => {
+      connectionState.value = state;
+    },
+  });
+}
+
+function createWebSocketTransport({ onReady, onFallback, onEvent, onState }) {
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  const url = `${scheme}://${location.host}/api/rooms/${encodeURIComponent(roomId.value)}/ws?client_id=${encodeURIComponent(deviceId.value)}`;
+  const socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
+  let ready = false;
+  let closedByClient = false;
+
+  socket.addEventListener("open", () => onState("连接中"));
+  socket.addEventListener("error", () => {
+    if (!ready) onFallback();
+  });
+  socket.addEventListener("close", () => {
+    if (!ready) {
+      onFallback();
+      return;
+    }
+    if (!closedByClient) {
+      transport.value = null;
+      transportMode.value = "";
+      onState("重连中");
+      startSSETransport();
+    }
+  });
+  socket.addEventListener("message", (event) => {
+    try {
+      const wireEvent = decode(new Uint8Array(event.data));
+      if (wireEvent.type === "welcome") {
+        ready = true;
+        onReady();
+        return;
+      }
+      onEvent(wireEvent);
+    } catch (err) {
+      addSystemMessage(`Could not process a WebSocket message: ${err.message || err}`);
+    }
+  });
+
+  return {
+    mode: "ws",
+    send(event) {
+      if (socket.readyState !== WebSocket.OPEN) throw new Error("WebSocket is not connected");
+      socket.send(encode(event));
+    },
+    bufferedAmount() {
+      return socket.bufferedAmount;
+    },
+    close() {
+      closedByClient = true;
+      socket.close();
+    },
+  };
+}
+
+function createSSETransport({ onOpen, onEvent, onState }) {
   const url = `/api/rooms/${encodeURIComponent(roomId.value)}/events?client_id=${encodeURIComponent(deviceId.value)}`;
-  source.value = new EventSource(url);
-  source.value.addEventListener("open", () => {
-    connectionState.value = "已连接";
-    postEvent({
-      type: "hello",
-      room: roomId.value,
-      from: deviceId.value,
-      public_key: b64(keyPair.value.publicKey),
-      display_name: displayName.value,
-    }).catch(showError);
+  const source = new EventSource(url);
+  source.addEventListener("open", onOpen);
+  source.addEventListener("error", () => onState("重连中（兼容模式）"));
+  source.addEventListener("ping", () => onState("已连接（兼容模式）"));
+  source.addEventListener("message", (event) => {
+    try {
+      onEvent(JSON.parse(event.data));
+    } catch (err) {
+      addSystemMessage(`Could not process an SSE message: ${err.message || err}`);
+    }
   });
-  source.value.addEventListener("error", () => {
-    connectionState.value = "重连中";
+  return {
+    mode: "sse",
+    async send(event) {
+      await postEvent(event);
+    },
+    close() {
+      source.close();
+    },
+  };
+}
+
+function dispatchWireEvent(event) {
+  handleWireEvent(event).catch((err) => {
+    addSystemMessage(`Could not process a message: ${err.message || err}`);
   });
-  source.value.addEventListener("ping", () => {
-    connectionState.value = "已连接";
-  });
-  source.value.addEventListener("message", (event) => {
-    handleWireEvent(JSON.parse(event.data)).catch((err) => {
-      addSystemMessage(`无法处理一条消息：${err.message || err}`);
-    });
+}
+
+async function sendHello() {
+  await sendEvent({
+    type: "hello",
+    room: roomId.value,
+    from: deviceId.value,
+    protocol: transportMode.value === "ws" ? 2 : 1,
+    features: transportMode.value === "ws" ? ["binary", "msgpack", "chunk_ack"] : ["sse"],
+    public_key: transportMode.value === "ws" ? keyPair.value.publicKey : b64(keyPair.value.publicKey),
+    display_name: displayName.value,
   });
 }
 
@@ -605,12 +743,13 @@ async function handleWireEvent(event) {
     case "hello":
       if (event.from === deviceId.value) return;
       rememberPeer(event.from, event.public_key, event.display_name);
-      await postEvent({
+      await sendEvent({
         type: "peer_hello",
         room: roomId.value,
         from: deviceId.value,
         to: event.from,
-        public_key: b64(keyPair.value.publicKey),
+        protocol: transportMode.value === "ws" ? 2 : 1,
+        public_key: transportMode.value === "ws" ? keyPair.value.publicKey : b64(keyPair.value.publicKey),
         display_name: displayName.value,
       });
       break;
@@ -620,6 +759,16 @@ async function handleWireEvent(event) {
       break;
     case "peer_leave":
       forgetPeer(event.from);
+      break;
+    case "server_ack":
+    case "chunk_ack":
+      handleServerAck(event.ack_id);
+      break;
+    case "recipient_ack":
+      handleRecipientAck(event);
+      break;
+    case "chunk":
+      receiveChunk(event);
       break;
     case "group_msg":
       receiveGroupMessage(event);
@@ -632,7 +781,7 @@ async function handleWireEvent(event) {
 
 function rememberPeer(id, publicKeyText, nameText = "") {
   if (!validDeviceId(id) || !publicKeyText) return;
-  const publicKey = sodium.from_base64(publicKeyText, sodium.base64_variants.ORIGINAL);
+  const publicKey = typeof publicKeyText === "string" ? sodium.from_base64(publicKeyText, sodium.base64_variants.ORIGINAL) : asBytes(publicKeyText);
   const next = new Map(peers.value);
   next.set(id, { publicKey, name: cleanName(nameText), lastSeen: Date.now() });
   peers.value = next;
@@ -672,19 +821,40 @@ async function sendCodeBlock() {
 }
 
 async function sendPayload(payload) {
-  if (selectedPeer.value) {
-    await sendPrivateMessage(selectedPeer.value, payload);
-  } else {
-    await sendGroupMessage(payload);
-  }
+  const to = selectedPeer.value;
+  const msgId = nextMessageId();
+  const localMessage = {
+    id: msgId,
+    msgId,
+    from: deviceId.value,
+    kind: payload.kind,
+    text: payload.text || "",
+    file: payload.file,
+    privateTo: to || "",
+    mine: true,
+    status: "pending",
+  };
+  addMessage(localMessage);
   draft.value = "";
   clearSelectedFile();
+
+  try {
+    if (to) {
+      await sendPrivateMessage(to, payload, msgId);
+    } else {
+      await sendGroupMessage(payload, msgId);
+    }
+  } catch (err) {
+    markMessageFailed(msgId, err.message || String(err));
+    throw err;
+  }
 }
 
 async function makeMessagePayload(text, file) {
   if (!file) return { kind: "text", text, sent_at: Date.now() };
-  if (file.size > maxFileBytes) {
-    throw new Error(`文件不能超过 ${formatBytes(maxFileBytes)}。`);
+  const limit = transportMode.value === "sse" ? fallbackMaxFileBytes : maxFileBytes;
+  if (file.size > limit) {
+    throw new Error(`File cannot exceed ${formatBytes(limit)}.`);
   }
   return {
     kind: "file",
@@ -703,84 +873,154 @@ function readFilePayload(file) {
         name: cleanFileName(file.name),
         type: file.type || "application/octet-stream",
         size: file.size,
-        data: b64(bytes),
+        data: transportMode.value === "ws" ? bytes : b64(bytes),
       });
     };
-    reader.onerror = () => reject(reader.error || new Error("读取文件失败"));
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
     reader.readAsArrayBuffer(file);
   });
 }
 
-async function sendGroupMessage(payload) {
+async function sendGroupMessage(payload, msgId) {
+  const event = encryptGroupEvent(payload, msgId);
+  await sendEncryptedEvent(event, { msgId, privateTo: "", hasFile: Boolean(payload.file) });
+}
+
+async function sendPrivateMessage(to, payload, msgId) {
+  const event = encryptPrivateEvent(to, payload, msgId);
+  await sendEncryptedEvent(event, { msgId, privateTo: to, hasFile: Boolean(payload.file) });
+}
+
+function encryptGroupEvent(payload, msgId) {
   const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-  const plaintext = sodium.from_string(JSON.stringify(payload));
+  const plaintext = encodePlainPayload(payload);
   const additionalData = sodium.from_string(`room:${roomId.value}`);
-  const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
-    plaintext,
-    additionalData,
-    null,
-    nonce,
-    roomKey.value,
-  );
-  await postEvent({
+  const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, additionalData, null, nonce, roomKey.value);
+  return {
     type: "group_msg",
     room: roomId.value,
     from: deviceId.value,
-    nonce: b64(nonce),
-    ciphertext: b64(ciphertext),
-  });
+    protocol: transportMode.value === "ws" ? 2 : 1,
+    msg_id: msgId,
+    nonce: transportMode.value === "ws" ? nonce : b64(nonce),
+    ciphertext: transportMode.value === "ws" ? ciphertext : b64(ciphertext),
+  };
 }
 
-async function sendPrivateMessage(to, payload) {
+function encryptPrivateEvent(to, payload, msgId) {
   const peer = peers.value.get(to);
   if (!peer) {
-    throw new Error("未找到该成员的公钥，暂时不能私发。");
+    throw new Error("Missing peer public key.");
   }
   const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
-  const plaintext = sodium.from_string(JSON.stringify(payload));
+  const plaintext = encodePlainPayload(payload);
   const ciphertext = sodium.crypto_box_easy(plaintext, nonce, peer.publicKey, keyPair.value.privateKey);
-  await postEvent({
+  return {
     type: "private_msg",
     room: roomId.value,
     from: deviceId.value,
     to,
-    nonce: b64(nonce),
-    ciphertext: b64(ciphertext),
-  });
-  addMessage({ from: deviceId.value, kind: payload.kind, text: payload.text || "", file: payload.file, privateTo: to, mine: true });
+    protocol: transportMode.value === "ws" ? 2 : 1,
+    msg_id: msgId,
+    nonce: transportMode.value === "ws" ? nonce : b64(nonce),
+    ciphertext: transportMode.value === "ws" ? ciphertext : b64(ciphertext),
+  };
+}
+
+function encodePlainPayload(payload) {
+  return transportMode.value === "ws" ? encode(payload) : sodium.from_string(JSON.stringify(payload));
+}
+
+function decodePlainPayload(plaintext, protocol = 1) {
+  if (protocol === 2 || transportMode.value === "ws") return decode(plaintext);
+  return JSON.parse(sodium.to_string(plaintext));
+}
+
+async function sendEncryptedEvent(event, { msgId, privateTo, hasFile }) {
+  registerPendingMessage(msgId, { privateTo, hasFile });
+  if (transportMode.value === "sse") {
+    await sendEvent(event);
+    handleMessageServerAck(msgId);
+    return;
+  }
+  if (transportMode.value === "ws" && hasFile) {
+    await sendChunkedEvent(event, { msgId, privateTo });
+  } else {
+    const ack = waitForServerAck(msgId, textAckTimeoutMs);
+    await sendEvent(event);
+    await ack;
+    handleMessageServerAck(msgId);
+  }
+}
+
+async function sendChunkedEvent(event, { msgId }) {
+  const ciphertext = asBytes(event.ciphertext);
+  const total = Math.max(1, Math.ceil(ciphertext.length / chunkSize));
+  for (let seq = 0; seq < total; seq += 1) {
+    await waitForSocketDrain();
+    const chunkMsgId = `${msgId}:${seq}`;
+    const chunk = ciphertext.slice(seq * chunkSize, Math.min(ciphertext.length, (seq + 1) * chunkSize));
+    const ack = waitForServerAck(chunkMsgId, chunkAckTimeoutMs, msgId);
+    await sendEvent({
+      type: "chunk",
+      room: event.room,
+      from: event.from,
+      to: event.to || "",
+      protocol: 2,
+      msg_id: chunkMsgId,
+      transfer_id: msgId,
+      message_type: event.type,
+      seq,
+      total,
+      nonce: event.nonce,
+      ciphertext: chunk,
+    });
+    await ack;
+  }
+  handleMessageServerAck(msgId);
+}
+
+async function waitForSocketDrain() {
+  while (transport.value?.mode === "ws" && transport.value.bufferedAmount?.() > chunkSize * 2) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function sendEvent(event) {
+  if (!transport.value) throw new Error("Not connected");
+  await transport.value.send(event);
 }
 
 function receiveGroupMessage(event) {
-  const nonce = sodium.from_base64(event.nonce, sodium.base64_variants.ORIGINAL);
-  const ciphertext = sodium.from_base64(event.ciphertext, sodium.base64_variants.ORIGINAL);
+  const msgId = event.msg_id || event.msgId;
+  if (event.from === deviceId.value) {
+    if (msgId) handleMessageServerAck(msgId);
+    return;
+  }
+  const nonce = decodeWireBytes(event.nonce);
+  const ciphertext = decodeWireBytes(event.ciphertext);
   const additionalData = sodium.from_string(`room:${roomId.value}`);
-  const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-    null,
-    ciphertext,
-    additionalData,
-    nonce,
-    roomKey.value,
-  );
-  const payload = JSON.parse(sodium.to_string(plaintext));
-  addMessage({ from: event.from, kind: payload.kind, text: payload.text || "", file: payload.file, mine: event.from === deviceId.value });
-  if (event.from !== deviceId.value) notifyIncomingMessage();
+  const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ciphertext, additionalData, nonce, roomKey.value);
+  const payload = decodePlainPayload(plaintext, event.protocol);
+  addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), mine: false, status: "delivered" });
+  notifyIncomingMessage();
 }
 
 function receivePrivateMessage(event) {
+  const msgId = event.msg_id || event.msgId;
   if (event.from === deviceId.value) return;
-  if (event.to !== deviceId.value) {
-    return;
-  }
+  if (event.to !== deviceId.value) return;
   const peer = peers.value.get(event.from);
   if (!peer) {
-    addSystemMessage(`收到 ${shortId(event.from)} 的私信，但缺少对方公钥`);
+    addSystemMessage(`Received a private message from ${shortId(event.from)}, but the peer public key is missing.`);
     return;
   }
-  const nonce = sodium.from_base64(event.nonce, sodium.base64_variants.ORIGINAL);
-  const ciphertext = sodium.from_base64(event.ciphertext, sodium.base64_variants.ORIGINAL);
+  const nonce = decodeWireBytes(event.nonce);
+  const ciphertext = decodeWireBytes(event.ciphertext);
   const plaintext = sodium.crypto_box_open_easy(ciphertext, nonce, peer.publicKey, keyPair.value.privateKey);
-  const payload = JSON.parse(sodium.to_string(plaintext));
-  addMessage({ from: event.from, kind: payload.kind, text: payload.text || "", file: payload.file, privateTo: deviceId.value, mine: false });
+  const payload = decodePlainPayload(plaintext, event.protocol);
+  addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), privateTo: deviceId.value, mine: false, status: "delivered" });
+  sendRecipientAck(msgId, event.from).catch(showError);
   notifyIncomingMessage();
 }
 
@@ -790,7 +1030,173 @@ async function postEvent(payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
-  if (!response.ok) throw new Error(`发送失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(`Send failed: HTTP ${response.status}`);
+}
+
+function registerPendingMessage(msgId, { privateTo, hasFile }) {
+  clearPendingMessage(msgId);
+  pendingMessages.set(msgId, {
+    privateTo,
+    hasFile,
+    serverAcked: false,
+    recipientAcked: false,
+    timer: setTimeout(() => {
+      markMessageFailed(msgId, privateTo ? "Peer did not acknowledge" : "Server did not acknowledge");
+    }, textAckTimeoutMs),
+  });
+}
+
+function waitForServerAck(ackId, timeoutMs, parentMsgId = ackId) {
+  clearPendingServerAck(ackId);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingServerAcks.delete(ackId);
+      markMessageFailed(parentMsgId, parentMsgId === ackId ? "Server did not acknowledge" : "File chunk timed out");
+      reject(new Error(parentMsgId === ackId ? "Server did not acknowledge" : "File chunk timed out"));
+    }, timeoutMs);
+    pendingServerAcks.set(ackId, { resolve, reject, timer });
+  });
+}
+
+function handleServerAck(ackId) {
+  if (!ackId) return;
+  const pendingAck = pendingServerAcks.get(ackId);
+  if (pendingAck) {
+    clearTimeout(pendingAck.timer);
+    pendingServerAcks.delete(ackId);
+    pendingAck.resolve();
+  }
+  if (!ackId.includes(":")) handleMessageServerAck(ackId);
+}
+
+function handleMessageServerAck(msgId) {
+  const pending = pendingMessages.get(msgId);
+  if (!pending || pending.serverAcked) return;
+  pending.serverAcked = true;
+  clearTimeout(pending.timer);
+  if (pending.privateTo) {
+    updateMessageStatus(msgId, "server_acked");
+    pending.timer = setTimeout(() => {
+      markMessageFailed(msgId, "Peer did not acknowledge");
+    }, textAckTimeoutMs);
+  } else {
+    clearPendingMessage(msgId);
+    updateMessageStatus(msgId, "sent");
+  }
+}
+
+function handleRecipientAck(event) {
+  const ackId = event.ack_id || event.ackId;
+  const pending = pendingMessages.get(ackId);
+  if (!pending) return;
+  pending.recipientAcked = true;
+  clearPendingMessage(ackId);
+  updateMessageStatus(ackId, "delivered");
+}
+
+async function sendRecipientAck(msgId, to) {
+  if (!msgId) return;
+  await sendEvent({
+    type: "recipient_ack",
+    room: roomId.value,
+    from: deviceId.value,
+    to,
+    protocol: transportMode.value === "ws" ? 2 : 1,
+    ack_id: msgId,
+  });
+}
+
+function clearPendingMessage(msgId) {
+  const pending = pendingMessages.get(msgId);
+  if (pending?.timer) clearTimeout(pending.timer);
+  pendingMessages.delete(msgId);
+}
+
+function clearPendingServerAck(ackId) {
+  const pending = pendingServerAcks.get(ackId);
+  if (pending?.timer) clearTimeout(pending.timer);
+  pendingServerAcks.delete(ackId);
+}
+
+function clearPendingTimers() {
+  for (const msgId of pendingMessages.keys()) clearPendingMessage(msgId);
+  for (const ackId of pendingServerAcks.keys()) clearPendingServerAck(ackId);
+}
+
+function markMessageFailed(msgId, reason) {
+  clearPendingMessage(msgId);
+  updateMessageStatus(msgId, "failed", reason);
+}
+
+function updateMessageStatus(msgId, status, failureReason = "") {
+  const index = messages.value.findIndex((message) => message.msgId === msgId || message.id === msgId);
+  if (index < 0) return;
+  messages.value[index] = { ...messages.value[index], status, failureReason };
+}
+
+function receiveChunk(event) {
+  if (event.from === deviceId.value) return;
+  if (event.to && event.to !== deviceId.value) return;
+  const transferId = event.transfer_id;
+  if (!transferId) return;
+  const total = Number(event.total || 0);
+  const seq = Number(event.seq || 0);
+  if (!Number.isInteger(total) || total <= 0 || !Number.isInteger(seq) || seq < 0 || seq >= total) return;
+
+  let transfer = incomingTransfers.get(transferId);
+  if (!transfer) {
+    transfer = {
+      event,
+      chunks: new Array(total),
+      received: 0,
+      expires: setTimeout(() => incomingTransfers.delete(transferId), chunkAckTimeoutMs * 2),
+    };
+    incomingTransfers.set(transferId, transfer);
+  }
+  if (!transfer.chunks[seq]) {
+    transfer.chunks[seq] = asBytes(event.ciphertext);
+    transfer.received += 1;
+  }
+  if (transfer.received !== transfer.chunks.length) return;
+
+  clearTimeout(transfer.expires);
+  incomingTransfers.delete(transferId);
+  const ciphertext = concatBytes(transfer.chunks);
+  const complete = {
+    ...transfer.event,
+    type: transfer.event.message_type,
+    msg_id: transferId,
+    ciphertext,
+  };
+  if (complete.type === "group_msg") receiveGroupMessage(complete);
+  if (complete.type === "private_msg") receivePrivateMessage(complete);
+}
+
+function decodeWireBytes(value) {
+  return typeof value === "string" ? sodium.from_base64(value, sodium.base64_variants.ORIGINAL) : asBytes(value);
+}
+
+function asBytes(value) {
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (Array.isArray(value)) return new Uint8Array(value);
+  return new Uint8Array(value || []);
+}
+
+function concatBytes(chunks) {
+  const size = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+function normalizeReceivedFile(file) {
+  if (!file) return null;
+  return { ...file, data: typeof file.data === "string" ? file.data : asBytes(file.data) };
 }
 
 function selectPeer(id) {
@@ -807,11 +1213,12 @@ function updateDisplayName() {
   displayName.value = name;
   sessionStorage.setItem("e2ee-chat-display-name", name);
   if (!deviceId.value || !keyPair.value) return;
-  postEvent({
+  sendEvent({
     type: "hello",
     room: roomId.value,
     from: deviceId.value,
-    public_key: b64(keyPair.value.publicKey),
+    protocol: transportMode.value === "ws" ? 2 : 1,
+    public_key: transportMode.value === "ws" ? keyPair.value.publicKey : b64(keyPair.value.publicKey),
     display_name: displayName.value,
   }).catch(showError);
 }
@@ -1103,7 +1510,8 @@ function isImageLike(type) {
 }
 
 function fileDataUrl(file) {
-  return `data:${file.type || "application/octet-stream"};base64,${file.data}`;
+  const data = typeof file.data === "string" ? file.data : b64(asBytes(file.data));
+  return `data:${file.type || "application/octet-stream"};base64,${data}`;
 }
 
 function formatBytes(value) {
@@ -1533,10 +1941,27 @@ function shortId(id) {
 }
 
 .byline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: var(--user-color, var(--muted));
   font-size: 12px;
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.message-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #d92d20;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .attachment {
