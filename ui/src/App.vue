@@ -91,9 +91,6 @@
             <n-alert v-if="notice" class="notice" type="error" :bordered="false">
               {{ notice }}
             </n-alert>
-            <n-alert v-if="weakCodeMode" class="notice" type="warning" :bordered="false">
-              群聊码模式只适合临时闲聊。
-            </n-alert>
 
             <div class="meta">
               <div class="name-control">
@@ -149,9 +146,6 @@
                 <n-button @click="copyInvite">复制邀请链接</n-button>
                 <n-button @click="copySafety">复制唯一码</n-button>
               </div>
-              <p v-if="weakCodeMode" class="detail-note">
-                群聊码模式只适合临时闲聊。
-              </p>
             </section>
 
             <div v-else class="chat-grid">
@@ -220,10 +214,10 @@
                             <img
                               v-if="isImageFile(message.file)"
                               class="attachment-image"
-                              :src="fileDataUrl(message.file)"
+                              :src="fileObjectUrl(message.file)"
                               :alt="message.file.name"
                             />
-                            <a class="attachment-link" :href="fileDataUrl(message.file)" :download="message.file.name">
+                            <a class="attachment-link" :href="fileObjectUrl(message.file)" :download="message.file.name">
                               <span>{{ isImageFile(message.file) ? "查看/下载图片" : "下载文件" }}</span>
                               <strong>{{ message.file.name }}</strong>
                               <em>{{ formatBytes(message.file.size) }}</em>
@@ -356,6 +350,8 @@ const notificationsEnabled = ref(notificationSupported() && localStorage.getItem
 const notificationPermission = ref(notificationSupported() ? Notification.permission : "unsupported");
 const windowFocused = ref(typeof document === "undefined" ? true : document.hasFocus());
 let messageSeq = 0;
+let cryptoWorker = null;
+let cryptoJobSeq = 0;
 const maxFileBytes = 20 * 1024 * 1024;
 const fallbackMaxFileBytes = 5 * 1024 * 1024;
 const wsConnectTimeoutMs = 3000;
@@ -365,6 +361,9 @@ const chunkSize = 256 * 1024;
 const pendingMessages = new Map();
 const pendingServerAcks = new Map();
 const incomingTransfers = new Map();
+const fileUrlCache = new WeakMap();
+const createdFileUrls = new Set();
+const cryptoJobs = new Map();
 const userPalette = [
   { color: "#176b87", background: "#e7f5f8", border: "#9ed7e1" },
   { color: "#7a4e10", background: "#fff2d8", border: "#e9c46a" },
@@ -421,7 +420,10 @@ onBeforeUnmount(() => {
   transport.value?.close();
   clearWSRetry();
   clearPendingTimers();
+  cryptoWorker?.terminate();
+  cryptoWorker = null;
   revokeSelectedFileUrl();
+  revokeFileObjectUrls();
   window.removeEventListener("focus", updateWindowFocus);
   window.removeEventListener("blur", updateWindowFocus);
   document.removeEventListener("visibilitychange", updateWindowFocus);
@@ -476,6 +478,7 @@ function confirmName() {
 function startChatSession() {
   deviceId.value = `dev_${base64Url(sodium.randombytes_buf(12))}`;
   keyPair.value = sodium.crypto_box_keypair();
+  getCryptoWorker();
   connectEvents();
 }
 
@@ -822,13 +825,13 @@ async function handleWireEvent(event) {
       handleRecipientAck(event);
       break;
     case "chunk":
-      receiveChunk(event);
+      await receiveChunk(event);
       break;
     case "group_msg":
-      receiveGroupMessage(event);
+      await receiveGroupMessage(event);
       break;
     case "private_msg":
-      receivePrivateMessage(event);
+      await receivePrivateMessage(event);
       break;
   }
 }
@@ -945,16 +948,36 @@ function readFilePayload(file) {
 }
 
 async function sendGroupMessage(payload, msgId) {
-  const event = encryptGroupEvent(payload, msgId);
+  const event = await encryptGroupEvent(payload, msgId);
   await sendEncryptedEvent(event, { msgId, privateTo: "", hasFile: Boolean(payload.file) });
 }
 
 async function sendPrivateMessage(to, payload, msgId) {
-  const event = encryptPrivateEvent(to, payload, msgId);
+  const event = await encryptPrivateEvent(to, payload, msgId);
   await sendEncryptedEvent(event, { msgId, privateTo: to, hasFile: Boolean(payload.file) });
 }
 
-function encryptGroupEvent(payload, msgId) {
+async function encryptGroupEvent(payload, msgId) {
+  if (transportMode.value === "ws") {
+    try {
+      const { nonce, ciphertext } = await cryptoCall("groupEncrypt", {
+        payload,
+        roomId: roomId.value,
+        roomKey: roomKey.value,
+      });
+      return {
+        type: "group_msg",
+        room: roomId.value,
+        from: deviceId.value,
+        protocol: 2,
+        msg_id: msgId,
+        nonce,
+        ciphertext,
+      };
+    } catch {
+      // Fall through to main-thread encrypt.
+    }
+  }
   const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
   const plaintext = encodePlainPayload(payload);
   const additionalData = sodium.from_string(`room:${roomId.value}`);
@@ -970,12 +993,34 @@ function encryptGroupEvent(payload, msgId) {
   };
 }
 
-function encryptPrivateEvent(to, payload, msgId) {
+async function encryptPrivateEvent(to, payload, msgId) {
   const peer = peers.value.get(to);
   if (!peer) {
     throw new Error("Missing peer public key.");
   }
   const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
+  if (transportMode.value === "ws") {
+    try {
+      const { ciphertext } = await cryptoCall("privateEncrypt", {
+        payload,
+        nonce,
+        peerPublicKey: peer.publicKey,
+        privateKey: keyPair.value.privateKey,
+      });
+      return {
+        type: "private_msg",
+        room: roomId.value,
+        from: deviceId.value,
+        to,
+        protocol: 2,
+        msg_id: msgId,
+        nonce,
+        ciphertext,
+      };
+    } catch {
+      // Fall through to main-thread encrypt.
+    }
+  }
   const plaintext = encodePlainPayload(payload);
   const ciphertext = sodium.crypto_box_easy(plaintext, nonce, peer.publicKey, keyPair.value.privateKey);
   return {
@@ -997,6 +1042,45 @@ function encodePlainPayload(payload) {
 function decodePlainPayload(plaintext, protocol = 1) {
   if (protocol === 2 || transportMode.value === "ws") return decode(plaintext);
   return JSON.parse(sodium.to_string(plaintext));
+}
+
+async function decryptGroupPayload(event) {
+  const nonce = decodeWireBytes(event.nonce);
+  const ciphertext = decodeWireBytes(event.ciphertext);
+  if (event.protocol === 2 || transportMode.value === "ws") {
+    try {
+      return await cryptoCall("groupDecrypt", {
+        nonce,
+        ciphertext,
+        roomId: roomId.value,
+        roomKey: roomKey.value,
+      });
+    } catch {
+      // Fall through to main-thread decrypt.
+    }
+  }
+  const additionalData = sodium.from_string(`room:${roomId.value}`);
+  const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ciphertext, additionalData, nonce, roomKey.value);
+  return decodePlainPayload(plaintext, event.protocol);
+}
+
+async function decryptPrivatePayload(event, peer) {
+  const nonce = decodeWireBytes(event.nonce);
+  const ciphertext = decodeWireBytes(event.ciphertext);
+  if (event.protocol === 2 || transportMode.value === "ws") {
+    try {
+      return await cryptoCall("privateDecrypt", {
+        nonce,
+        ciphertext,
+        peerPublicKey: peer.publicKey,
+        privateKey: keyPair.value.privateKey,
+      });
+    } catch {
+      // Fall through to main-thread decrypt.
+    }
+  }
+  const plaintext = sodium.crypto_box_open_easy(ciphertext, nonce, peer.publicKey, keyPair.value.privateKey);
+  return decodePlainPayload(plaintext, event.protocol);
 }
 
 async function sendEncryptedEvent(event, { msgId, privateTo, hasFile }) {
@@ -1054,22 +1138,18 @@ async function sendEvent(event) {
   await transport.value.send(event);
 }
 
-function receiveGroupMessage(event) {
+async function receiveGroupMessage(event) {
   const msgId = event.msg_id || event.msgId;
   if (event.from === deviceId.value) {
     if (msgId) handleMessageServerAck(msgId);
     return;
   }
-  const nonce = decodeWireBytes(event.nonce);
-  const ciphertext = decodeWireBytes(event.ciphertext);
-  const additionalData = sodium.from_string(`room:${roomId.value}`);
-  const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ciphertext, additionalData, nonce, roomKey.value);
-  const payload = decodePlainPayload(plaintext, event.protocol);
+  const payload = await decryptGroupPayload(event);
   addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), mine: false, status: "delivered" });
   notifyIncomingMessage();
 }
 
-function receivePrivateMessage(event) {
+async function receivePrivateMessage(event) {
   const msgId = event.msg_id || event.msgId;
   if (event.from === deviceId.value) return;
   if (event.to !== deviceId.value) return;
@@ -1078,10 +1158,7 @@ function receivePrivateMessage(event) {
     addSystemMessage(`Received a private message from ${shortId(event.from)}, but the peer public key is missing.`);
     return;
   }
-  const nonce = decodeWireBytes(event.nonce);
-  const ciphertext = decodeWireBytes(event.ciphertext);
-  const plaintext = sodium.crypto_box_open_easy(ciphertext, nonce, peer.publicKey, keyPair.value.privateKey);
-  const payload = decodePlainPayload(plaintext, event.protocol);
+  const payload = await decryptPrivatePayload(event, peer);
   addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), privateTo: deviceId.value, mine: false, status: "delivered" });
   sendRecipientAck(msgId, event.from).catch(showError);
   notifyIncomingMessage();
@@ -1197,7 +1274,7 @@ function updateMessageStatus(msgId, status, failureReason = "") {
   messages.value[index] = { ...messages.value[index], status, failureReason };
 }
 
-function receiveChunk(event) {
+async function receiveChunk(event) {
   if (event.from === deviceId.value) return;
   if (event.to && event.to !== deviceId.value) return;
   const transferId = event.transfer_id;
@@ -1231,8 +1308,8 @@ function receiveChunk(event) {
     msg_id: transferId,
     ciphertext,
   };
-  if (complete.type === "group_msg") receiveGroupMessage(complete);
-  if (complete.type === "private_msg") receivePrivateMessage(complete);
+  if (complete.type === "group_msg") await receiveGroupMessage(complete);
+  if (complete.type === "private_msg") await receivePrivateMessage(complete);
 }
 
 function decodeWireBytes(value) {
@@ -1260,6 +1337,47 @@ function concatBytes(chunks) {
 function normalizeReceivedFile(file) {
   if (!file) return null;
   return { ...file, data: typeof file.data === "string" ? file.data : asBytes(file.data) };
+}
+
+function cryptoCall(op, data) {
+  const worker = getCryptoWorker();
+  const id = `crypto_${cryptoJobSeq += 1}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cryptoJobs.delete(id);
+      reject(new Error("Crypto worker timed out"));
+    }, 30000);
+    cryptoJobs.set(id, { resolve, reject, timer });
+    worker.postMessage({ id, op, data });
+  });
+}
+
+function getCryptoWorker() {
+  if (cryptoWorker) return cryptoWorker;
+  cryptoWorker = new Worker(new URL("./crypto-worker.js", import.meta.url), { type: "module" });
+  cryptoWorker.addEventListener("message", (event) => {
+    const { id, ok, result, error } = event.data || {};
+    const job = cryptoJobs.get(id);
+    if (!job) return;
+    clearTimeout(job.timer);
+    cryptoJobs.delete(id);
+    if (ok) {
+      job.resolve(result);
+    } else {
+      job.reject(new Error(error || "Crypto worker failed"));
+    }
+  });
+  cryptoWorker.addEventListener("error", (event) => {
+    const error = new Error(event.message || "Crypto worker failed");
+    for (const [id, job] of cryptoJobs.entries()) {
+      clearTimeout(job.timer);
+      job.reject(error);
+      cryptoJobs.delete(id);
+    }
+    cryptoWorker?.terminate();
+    cryptoWorker = null;
+  });
+  return cryptoWorker;
 }
 
 function selectPeer(id) {
@@ -1579,9 +1697,27 @@ function isImageLike(type) {
   return String(type || "").startsWith("image/");
 }
 
-function fileDataUrl(file) {
-  const data = typeof file.data === "string" ? file.data : b64(asBytes(file.data));
-  return `data:${file.type || "application/octet-stream"};base64,${data}`;
+function fileObjectUrl(file) {
+  if (!file || typeof file !== "object") return "";
+  const cached = fileUrlCache.get(file);
+  if (cached) return cached;
+  const blob = new Blob([fileBytes(file)], { type: file.type || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  fileUrlCache.set(file, url);
+  createdFileUrls.add(url);
+  return url;
+}
+
+function fileBytes(file) {
+  if (typeof file.data === "string") {
+    return sodium.from_base64(file.data, sodium.base64_variants.ORIGINAL);
+  }
+  return asBytes(file.data);
+}
+
+function revokeFileObjectUrls() {
+  for (const url of createdFileUrls) URL.revokeObjectURL(url);
+  createdFileUrls.clear();
 }
 
 function formatBytes(value) {
@@ -1668,6 +1804,7 @@ function shortId(id) {
 
 .chat {
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
@@ -1677,6 +1814,7 @@ function shortId(id) {
 }
 
 .room-header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1714,6 +1852,7 @@ function shortId(id) {
 }
 
 .notice {
+  flex: 0 0 auto;
   margin: 8px 18px 0;
 }
 
@@ -1722,6 +1861,7 @@ function shortId(id) {
 }
 
 .meta {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 14px;
@@ -1771,6 +1911,7 @@ function shortId(id) {
   grid-template-columns: 300px minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
+  overflow: hidden;
 }
 
 .members {
@@ -1916,10 +2057,12 @@ function shortId(id) {
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .messages {
   min-height: 0;
+  overflow: hidden;
 }
 
 .message-stack {

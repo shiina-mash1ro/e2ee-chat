@@ -3,6 +3,9 @@ import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
   plugins: [vue()],
+  worker: {
+    format: "es",
+  },
   build: {
     outDir: "../server/static",
     emptyOutDir: true,
