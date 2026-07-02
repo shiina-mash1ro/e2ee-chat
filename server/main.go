@@ -211,19 +211,7 @@ func (h *Hub) broadcast(roomID string, msg []byte) {
 	defer h.mu.Unlock()
 
 	room := h.roomLocked(roomID)
-
-	var stale []string
-	for id, c := range room.sseClients {
-		select {
-		case c.events <- msg:
-		default:
-			stale = append(stale, id)
-		}
-	}
-	for _, id := range stale {
-		close(room.sseClients[id].events)
-		delete(room.sseClients, id)
-	}
+	h.broadcastToSSELocked(room, nil, msg)
 	if len(room.sseClients)+len(room.wsClients) == 0 {
 		delete(h.rooms, roomID)
 	}
@@ -287,8 +275,60 @@ func (h *Hub) broadcastWS(roomID string, msg []byte) {
 	defer h.mu.Unlock()
 
 	room := h.roomLocked(roomID)
+	h.broadcastToWSLocked(room, nil, msg)
+	if len(room.sseClients)+len(room.wsClients) == 0 {
+		delete(h.rooms, roomID)
+	}
+}
+
+func (h *Hub) dispatchSSE(roomID string, event inboundEvent, msg []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.roomLocked(roomID)
+	targets := eventTargets(event.Type, event.From, event.To)
+	h.broadcastToSSELocked(room, targets, msg)
+	if len(room.sseClients)+len(room.wsClients) == 0 {
+		delete(h.rooms, roomID)
+	}
+}
+
+func (h *Hub) dispatchWS(roomID string, event wsEnvelope, msg []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.roomLocked(roomID)
+	targets := eventTargets(event.Type, event.From, event.To)
+	h.broadcastToWSLocked(room, targets, msg)
+	if len(room.sseClients)+len(room.wsClients) == 0 {
+		delete(h.rooms, roomID)
+	}
+}
+
+func (h *Hub) broadcastToSSELocked(room *Room, targets map[string]struct{}, msg []byte) {
+	var stale []string
+	for id, c := range room.sseClients {
+		if !targetAllowed(targets, id) {
+			continue
+		}
+		select {
+		case c.events <- msg:
+		default:
+			stale = append(stale, id)
+		}
+	}
+	for _, id := range stale {
+		close(room.sseClients[id].events)
+		delete(room.sseClients, id)
+	}
+}
+
+func (h *Hub) broadcastToWSLocked(room *Room, targets map[string]struct{}, msg []byte) {
 	var stale []string
 	for id, c := range room.wsClients {
+		if !targetAllowed(targets, id) {
+			continue
+		}
 		select {
 		case c.events <- msg:
 		default:
@@ -299,9 +339,28 @@ func (h *Hub) broadcastWS(roomID string, msg []byte) {
 		close(room.wsClients[id].events)
 		delete(room.wsClients, id)
 	}
-	if len(room.sseClients)+len(room.wsClients) == 0 {
-		delete(h.rooms, roomID)
+}
+
+func eventTargets(eventType, from, to string) map[string]struct{} {
+	if eventType != "private_msg" && eventType != "recipient_ack" && eventType != "chunk" {
+		return nil
 	}
+	if to == "" {
+		return nil
+	}
+	targets := map[string]struct{}{to: {}}
+	if from != "" {
+		targets[from] = struct{}{}
+	}
+	return targets
+}
+
+func targetAllowed(targets map[string]struct{}, id string) bool {
+	if targets == nil {
+		return true
+	}
+	_, ok := targets[id]
+	return ok
 }
 
 func main() {
@@ -566,8 +625,8 @@ func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID str
 		return
 	}
 
-	h.broadcast(roomID, body)
-	log.Printf("broadcast room=%s type=%s", roomID, event.Type)
+	h.dispatchSSE(roomID, event, body)
+	log.Printf("dispatch room=%s type=%s", roomID, event.Type)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -670,8 +729,8 @@ func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *webso
 		if event.MsgID != "" {
 			enqueueWS(client, wsEnvelope{Type: ackType, Room: roomID, From: "server", Protocol: 2, AckID: event.MsgID})
 		}
-		h.broadcastWS(roomID, body)
-		log.Printf("ws broadcast room=%s type=%s", roomID, event.Type)
+		h.dispatchWS(roomID, event, body)
+		log.Printf("ws dispatch room=%s type=%s", roomID, event.Type)
 	}
 }
 

@@ -26,7 +26,6 @@
             <n-space vertical :size="18">
               <div>
                 <h1>临时群聊</h1>
-                <p>链接即权限，服务端只负责转发消息。</p>
               </div>
               <div class="theme-control">
                 <span>深色模式</span>
