@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.1.0. Leave empty to use a timestamp tag."
+        description: "Release tag, for example v2026.07.02-r0. Leave empty to use today's next rN tag."
         required: false
         type: string
       prerelease:
@@ -35,7 +35,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.23.x"
+          go-version: "1.26.4"
           cache-dependency-path: server/go.mod
 
       - name: Install frontend dependencies
@@ -80,12 +80,23 @@ jobs:
 
       - name: Resolve release tag
         id: release_tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ inputs.tag }}"
           if [ -z "$tag" ]; then
-            tag="v$(date -u +'%Y%m%d-%H%M%S')"
+            base="v$(date -u +'%Y.%m.%d')"
+            index=0
+            while true; do
+              tag="${base}-r${index}"
+              if ! gh release view "$tag" >/dev/null 2>&1 && \
+                 ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+                break
+              fi
+              index=$((index + 1))
+            done
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
