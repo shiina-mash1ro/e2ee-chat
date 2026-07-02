@@ -205,7 +205,8 @@
                         <div class="message-bubble">
                           <div class="byline">
                             <span>{{ messageLabel(message) }}</span>
-                            <span v-if="message.status === 'failed'" class="message-status" :title="message.failureReason || '发送失败'">!</span>
+                            <span v-if="isMessageBusy(message)" class="message-spinner" title="发送中"></span>
+                            <span v-else-if="message.status === 'failed'" class="message-status" :title="message.failureReason || '发送失败'">!</span>
                           </div>
                           <div v-if="message.kind === 'code'" class="code-block">
                             <div class="code-block-head">
@@ -270,7 +271,7 @@
                     @keydown.enter.exact.prevent="sendMessage"
                   />
                   <n-button attr-type="button" :disabled="!canSendCode" @click="sendCodeBlock">代码</n-button>
-                  <n-button type="primary" attr-type="submit" :disabled="!canSubmit">
+                  <n-button type="primary" attr-type="submit" :disabled="!canSubmit" :title="sendDisabledReason">
                     {{ selectedPeer ? `私发给 ${displayNameFor(selectedPeer)}` : "发送群聊" }}
                   </n-button>
                 </n-form>
@@ -327,8 +328,10 @@ const deviceId = ref("");
 const keyPair = ref(null);
 const peers = ref(new Map());
 const selectedPeer = ref("");
+const offlinePrivatePeers = ref(new Map());
 const transport = ref(null);
 const transportMode = ref("");
+const wsRetryTimer = ref(null);
 const notice = ref("");
 const safetyCode = ref("");
 const connectionState = ref("未连接");
@@ -394,8 +397,10 @@ const emojiList = [
 ];
 
 const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && transport.value));
-const canSubmit = computed(() => canSend.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
-const canSendCode = computed(() => canSend.value && Boolean(draft.value) && !selectedFile.value);
+const selectedPeerOffline = computed(() => Boolean(selectedPeer.value && !peers.value.has(selectedPeer.value)));
+const canSubmit = computed(() => canSend.value && !selectedPeerOffline.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
+const canSendCode = computed(() => canSend.value && !selectedPeerOffline.value && Boolean(draft.value) && !selectedFile.value);
+const sendDisabledReason = computed(() => (selectedPeerOffline.value ? "私聊对象已断开，请重新选择私聊对象或切回群聊" : ""));
 const validJoinCode = computed(() => isValidCode(joinCode.value));
 const validCustomCode = computed(() => isValidCode(customCode.value));
 const sortedPeers = computed(() => [...peers.value.entries()].sort().map(([id, peer]) => ({ id, ...peer })));
@@ -414,6 +419,7 @@ sodium.ready.then(() => {
 
 onBeforeUnmount(() => {
   transport.value?.close();
+  clearWSRetry();
   clearPendingTimers();
   revokeSelectedFileUrl();
   window.removeEventListener("focus", updateWindowFocus);
@@ -590,6 +596,7 @@ function connectEvents() {
   transport.value?.close();
   transport.value = null;
   transportMode.value = "";
+  clearWSRetry();
   connectionState.value = "连接中";
 
   let settled = false;
@@ -606,6 +613,7 @@ function connectEvents() {
       if (settled) return;
       settled = true;
       clearTimeout(fallbackTimer);
+      clearWSRetry();
       transport.value = wsTransport;
       transportMode.value = "ws";
       connectionState.value = "已连接";
@@ -626,6 +634,8 @@ function connectEvents() {
 }
 
 function startSSETransport() {
+  if (transport.value?.mode === "sse") return;
+  transport.value?.close();
   const sseTransport = createSSETransport({
     onOpen: () => {
       transport.value = sseTransport;
@@ -638,6 +648,50 @@ function startSSETransport() {
       connectionState.value = state;
     },
   });
+  scheduleWSRetry();
+}
+
+function scheduleWSRetry() {
+  clearWSRetry();
+  wsRetryTimer.value = setTimeout(() => {
+    wsRetryTimer.value = null;
+    if (!roomId.value || !deviceId.value || transportMode.value === "ws") return;
+    let retrySettled = false;
+    const retryTransport = createWebSocketTransport({
+      onReady: () => {
+        if (retrySettled) return;
+        retrySettled = true;
+        clearWSRetry();
+        const oldTransport = transport.value;
+        transport.value = retryTransport;
+        transportMode.value = "ws";
+        oldTransport?.close();
+        connectionState.value = "已连接";
+        sendHello().catch(showError);
+      },
+      onFallback: () => {
+        if (retrySettled) return;
+        retrySettled = true;
+        retryTransport.close();
+        scheduleWSRetry();
+      },
+      onEvent: dispatchWireEvent,
+      onState: () => {},
+    });
+    setTimeout(() => {
+      if (retrySettled || transportMode.value === "ws") return;
+      retrySettled = true;
+      retryTransport.close();
+      scheduleWSRetry();
+    }, wsConnectTimeoutMs);
+  }, 5000);
+}
+
+function clearWSRetry() {
+  if (wsRetryTimer.value) {
+    clearTimeout(wsRetryTimer.value);
+    wsRetryTimer.value = null;
+  }
 }
 
 function createWebSocketTransport({ onReady, onFallback, onEvent, onState }) {
@@ -785,13 +839,22 @@ function rememberPeer(id, publicKeyText, nameText = "") {
   const next = new Map(peers.value);
   next.set(id, { publicKey, name: cleanName(nameText), lastSeen: Date.now() });
   peers.value = next;
+  const offline = new Map(offlinePrivatePeers.value);
+  offline.delete(id);
+  offlinePrivatePeers.value = offline;
 }
 
 function forgetPeer(id) {
+  const known = peers.value.get(id);
   const next = new Map(peers.value);
   next.delete(id);
   peers.value = next;
-  if (selectedPeer.value === id) selectPeer("");
+  if (selectedPeer.value === id) {
+    const offline = new Map(offlinePrivatePeers.value);
+    offline.set(id, known || offline.get(id) || { name: shortId(id) });
+    offlinePrivatePeers.value = offline;
+    addSystemMessage(`${displayNameFor(id)} 已断开，当前私聊已暂停。请重新选择私聊对象或切回群聊。`);
+  }
 }
 
 async function sendMessage() {
@@ -1200,6 +1263,9 @@ function normalizeReceivedFile(file) {
 }
 
 function selectPeer(id) {
+  if (!id) {
+    offlinePrivatePeers.value = new Map();
+  }
   selectedPeer.value = id;
   memberDrawerVisible.value = false;
 }
@@ -1225,7 +1291,7 @@ function updateDisplayName() {
 
 function displayNameFor(id) {
   if (id === deviceId.value) return displayName.value || shortId(id);
-  return peers.value.get(id)?.name || shortId(id);
+  return peers.value.get(id)?.name || offlinePrivatePeers.value.get(id)?.name || shortId(id);
 }
 
 function insertEmoji(emoji) {
@@ -1306,6 +1372,10 @@ function messageStyle(message) {
     "--user-bg": visual.background,
     "--user-border": visual.border,
   };
+}
+
+function isMessageBusy(message) {
+  return message.mine && (message.status === "pending" || message.status === "server_acked");
 }
 
 function userVisual(id) {
@@ -1962,6 +2032,21 @@ function shortId(id) {
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
+}
+
+.message-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid color-mix(in srgb, var(--user-color, var(--muted)) 24%, transparent);
+  border-top-color: var(--user-color, var(--muted));
+  border-radius: 50%;
+  animation: message-spin 0.8s linear infinite;
+}
+
+@keyframes message-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .attachment {
