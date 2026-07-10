@@ -6,14 +6,52 @@ const tinyPng = Buffer.from(
 );
 
 const baseURL = process.env.BASE_URL || "http://127.0.0.1:8080";
+let recoveryInviteURL = "";
 
 const browser = await chromium.launch({ headless: true });
 
 try {
   await runFullLinkSmoke();
+  await runSSERecoverySmoke();
   await runCodeSmoke();
+  await runMultiRoomIsolationSmoke();
 } finally {
   await browser.close();
+}
+
+async function runMultiRoomIsolationSmoke() {
+  const context = await browser.newContext();
+  try {
+    const firstRoom = await context.newPage();
+    const secondRoom = await context.newPage();
+    await firstRoom.goto(baseURL, { waitUntil: "domcontentloaded" });
+    await firstRoom.getByRole("button", { name: "创建大力房间" }).click();
+    await firstRoom.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
+    await enterName(firstRoom, "First tab");
+    await secondRoom.goto(baseURL, { waitUntil: "domcontentloaded" });
+    await secondRoom.getByRole("button", { name: "创建大力房间" }).click();
+    await secondRoom.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
+    await enterName(secondRoom, "Second tab");
+    await firstRoom.getByText("已连接").waitFor({ timeout: 10000 });
+    await secondRoom.getByText("已连接").waitFor({ timeout: 10000 });
+    await firstRoom.getByPlaceholder("输入消息").fill("first-room-only");
+    await firstRoom.getByRole("button", { name: "发送群聊" }).click();
+    await firstRoom.getByText("first-room-only").waitFor({ timeout: 10000 });
+    await secondRoom.waitForTimeout(500);
+    if (await secondRoom.getByText("first-room-only").count()) {
+      throw new Error("message leaked between rooms in separate tabs");
+    }
+    const [firstDevice, secondDevice] = await Promise.all([
+      firstRoom.locator(".meta-pill").filter({ hasText: "设备" }).locator("strong").textContent(),
+      secondRoom.locator(".meta-pill").filter({ hasText: "设备" }).locator("strong").textContent(),
+    ]);
+    if (!firstDevice || !secondDevice || firstDevice === secondDevice) {
+      throw new Error(`expected tab-isolated device IDs, got ${firstDevice} and ${secondDevice}`);
+    }
+    console.log(JSON.stringify({ mode: "multi-room-tabs", firstDevice, secondDevice }, null, 2));
+  } finally {
+    await context.close();
+  }
 }
 
 async function runFullLinkSmoke() {
@@ -27,6 +65,7 @@ async function runFullLinkSmoke() {
     await pageA.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
     await enterName(pageA, "Alice");
     const inviteURL = pageA.url();
+    recoveryInviteURL = inviteURL;
 
     const pageB = await contextB.newPage();
     await pageB.goto(inviteURL, { waitUntil: "domcontentloaded" });
@@ -50,6 +89,62 @@ async function runFullLinkSmoke() {
     await contextA.close();
     await contextB.close();
     await contextC.close();
+  }
+}
+
+async function runSSERecoverySmoke() {
+  const fallbackContext = await browser.newContext();
+  const peerContext = await browser.newContext();
+  try {
+    await fallbackContext.addInitScript(() => {
+      const NativeWebSocket = window.WebSocket;
+      let failuresRemaining = 1;
+      window.WebSocket = new Proxy(NativeWebSocket, {
+        construct(Target, args) {
+          if (failuresRemaining <= 0) return new Target(...args);
+          failuresRemaining -= 1;
+          class FailedSocket extends EventTarget {
+            constructor() {
+              super();
+              this.readyState = NativeWebSocket.CONNECTING;
+              this.bufferedAmount = 0;
+              queueMicrotask(() => {
+                this.dispatchEvent(new Event("error"));
+                this.readyState = NativeWebSocket.CLOSED;
+                this.dispatchEvent(new CloseEvent("close"));
+              });
+            }
+            close() {
+              this.readyState = NativeWebSocket.CLOSED;
+            }
+            send() {
+              throw new Error("simulated WebSocket failure");
+            }
+          }
+          return new FailedSocket();
+        },
+      });
+    });
+
+    const fallbackPage = await fallbackContext.newPage();
+    await fallbackPage.goto(recoveryInviteURL, { waitUntil: "domcontentloaded" });
+    await enterName(fallbackPage, "SSE fallback");
+    await fallbackPage.getByText("已连接（兼容模式）", { exact: true }).waitFor({ timeout: 10000 });
+    await fallbackPage.getByPlaceholder("输入消息").fill("sent while using SSE");
+    await fallbackPage.getByRole("button", { name: "发送群聊" }).click();
+    await fallbackPage.getByText("已连接", { exact: true }).waitFor({ timeout: 10000 });
+
+    const peerPage = await peerContext.newPage();
+    await peerPage.goto(recoveryInviteURL, { waitUntil: "domcontentloaded" });
+    await enterName(peerPage, "WS peer");
+    await peerPage.getByText("已连接", { exact: true }).waitFor({ timeout: 10000 });
+    await peerPage.getByPlaceholder("输入消息").fill("after websocket recovery");
+    await peerPage.getByRole("button", { name: "发送群聊" }).click();
+    await fallbackPage.getByText("after websocket recovery").waitFor({ timeout: 10000 });
+    console.log(JSON.stringify({ mode: "sse-websocket-recovery" }, null, 2));
+  } finally {
+    await fallbackContext.close();
+    await peerContext.close();
   }
 }
 
@@ -112,6 +207,11 @@ async function assertChatWorks(pageA, pageB, pageC) {
   await pageB.getByText("hello from A group").waitFor({ timeout: 10000 });
   await pageC.getByText("hello from A group").waitFor({ timeout: 10000 });
 
+  await pageA.getByRole("button", { name: "切换代码模式" }).click();
+  await pageA.getByPlaceholder("输入消息").fill("const answer = 42;");
+  await pageA.getByRole("button", { name: "发送群聊" }).click();
+  await pageB.locator(".code-block").filter({ hasText: "const answer = 42;" }).waitFor({ timeout: 10000 });
+
   await pageA.locator('input[type="file"]').setInputFiles({
     name: "hello.txt",
     mimeType: "text/plain",
@@ -124,6 +224,13 @@ async function assertChatWorks(pageA, pageB, pageC) {
   await pageB.getByRole("button", { name: "发送群聊" }).click();
   await pageA.getByText("hello from B group").waitFor({ timeout: 10000 });
   await pageC.getByText("hello from B group").waitFor({ timeout: 10000 });
+  await pageB.getByPlaceholder("输入消息").fill("first line\nsecond line\nthird line");
+  await pageB.getByRole("button", { name: "发送群聊" }).click();
+  const multiline = pageA.locator(".message-bubble .text").filter({ hasText: "first line" });
+  await multiline.waitFor({ timeout: 10000 });
+  if (await multiline.innerText() !== "first line\nsecond line\nthird line") {
+    throw new Error("plain-text message line breaks were not preserved");
+  }
   await assertDifferentSenderColors(pageC, "hello from A group", "hello from B group");
 
   await pageB.locator('input[type="file"]').setInputFiles({
@@ -150,6 +257,18 @@ async function assertChatWorks(pageA, pageB, pageC) {
   await pageA.getByRole("button", { name: "发送群聊" }).click();
   await pageB.getByText(/pasted-image-|paste\\.png/).waitFor({ timeout: 10000 });
 
+  await pageA.locator(".attachment-image").first().click();
+  await pageA.locator(".image-preview-card").waitFor({ timeout: 10000 });
+  await pageA.getByRole("button", { name: "放大图片" }).click();
+  await pageA.getByText("125%", { exact: true }).waitFor({ timeout: 10000 });
+  const zoomedTransform = await pageA.locator(".image-preview-stage img").getAttribute("style");
+  if (!zoomedTransform?.includes("scale(1.25)")) {
+    throw new Error(`image preview did not zoom: ${zoomedTransform}`);
+  }
+  await pageA.getByRole("button", { name: "重置" }).click();
+  await pageA.getByText("100%", { exact: true }).waitFor({ timeout: 10000 });
+  await pageA.getByRole("button", { name: "关闭", exact: true }).click();
+
   await pageA.locator(".members .n-list-item").filter({ hasText: "Bob" }).click();
   await pageA.getByPlaceholder("输入消息").fill("private from A to B");
   await pageA.getByRole("button", { name: /^私发给 / }).click();
@@ -161,6 +280,12 @@ async function assertChatWorks(pageA, pageB, pageC) {
   if (await pageC.getByText(/不可读私信|private/i).count()) {
     throw new Error("third client should not see private-message system hints");
   }
+
+  await pageA.getByRole("button", { name: "一键鸵鸟" }).click();
+  await pageA.getByRole("button", { name: "确认", exact: true }).click();
+  await pageB.getByText("hello from A group").waitFor({ state: "detached", timeout: 10000 });
+  await pageC.getByText("hello from A group").waitFor({ state: "detached", timeout: 10000 });
+  await pageB.getByText("hello from B group").waitFor({ timeout: 10000 });
 }
 
 async function assertDifferentSenderColors(page, firstText, secondText) {

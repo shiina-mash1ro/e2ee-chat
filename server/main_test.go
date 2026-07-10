@@ -270,6 +270,197 @@ func TestSSEPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 	assertNoClientMessage(t, bystander)
 }
 
+func TestExplicitPurgeBroadcastsWithoutDisconnecting(t *testing.T) {
+	h := newHub()
+	sender := &Client{id: "client_sender1", token: "token_sender123", events: make(chan []byte, 2)}
+	receiver := &Client{id: "client_receiver", events: make(chan []byte, 2)}
+	if err := h.addClient("testroom", sender); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addClient("testroom", receiver); err != nil {
+		t.Fatal(err)
+	}
+
+	if !h.explicitAction("testroom", sender.id, sender.token, nil, false) {
+		t.Fatal("authorized purge was rejected")
+	}
+	assertJSONEventType(t, sender, "peer_purge")
+	assertJSONEventType(t, receiver, "peer_purge")
+	if !h.clientOnline("testroom", sender.id) {
+		t.Fatal("purge disconnected sender")
+	}
+	if h.explicitAction("testroom", receiver.id, "wrong_token", nil, false) {
+		t.Fatal("purge accepted an invalid connection token")
+	}
+}
+
+func TestExplicitLeavePurgesAndDisconnects(t *testing.T) {
+	h := newHub()
+	sender := &Client{id: "client_sender1", token: "token_sender123", events: make(chan []byte, 2)}
+	receiver := &Client{id: "client_receiver", events: make(chan []byte, 3)}
+	if err := h.addClient("testroom", sender); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addClient("testroom", receiver); err != nil {
+		t.Fatal(err)
+	}
+
+	if !h.explicitAction("testroom", sender.id, sender.token, nil, true) {
+		t.Fatal("authorized leave was rejected")
+	}
+	assertJSONEventType(t, receiver, "peer_purge")
+	assertJSONEventType(t, receiver, "peer_leave")
+	if h.clientOnline("testroom", sender.id) {
+		t.Fatal("leaving sender is still online")
+	}
+}
+
+func TestDisconnectGraceReconnectCancelsPurge(t *testing.T) {
+	h := newHub()
+	h.leaveGrace = 25 * time.Millisecond
+	old := &Client{id: "client_sender1", events: make(chan []byte, 1)}
+	receiver := &Client{id: "client_receiver", events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addClient("testroom", receiver); err != nil {
+		t.Fatal(err)
+	}
+	if !h.removeClient("testroom", old) {
+		t.Fatal("disconnect was not recorded")
+	}
+	reconnected := &Client{id: old.id, events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", reconnected); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	assertNoClientMessage(t, receiver)
+	if !h.clientOnline("testroom", old.id) {
+		t.Fatal("reconnected client was removed")
+	}
+}
+
+func TestDisconnectGracePurgesAfterTimeout(t *testing.T) {
+	h := newHub()
+	h.leaveGrace = 10 * time.Millisecond
+	sender := &Client{id: "client_sender1", events: make(chan []byte, 1)}
+	receiver := &Client{id: "client_receiver", events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", sender); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addClient("testroom", receiver); err != nil {
+		t.Fatal(err)
+	}
+	if !h.removeClient("testroom", sender) {
+		t.Fatal("disconnect was not recorded")
+	}
+	select {
+	case body := <-receiver.events:
+		var event inboundEvent
+		if err := json.Unmarshal(body, &event); err != nil || event.Type != "peer_purge" || event.From != sender.id {
+			t.Fatalf("purge event = %s, error = %v", body, err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("timed out waiting for peer_purge")
+	}
+}
+
+func TestOldConnectionCannotRemoveReplacement(t *testing.T) {
+	h := newHub()
+	old := &Client{id: "client_sender1", events: make(chan []byte, 1)}
+	replacement := &Client{id: old.id, events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", old); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addClient("testroom", replacement); err != nil {
+		t.Fatal(err)
+	}
+	if h.removeClient("testroom", old) {
+		t.Fatal("old connection removed its replacement")
+	}
+	if !h.clientOnline("testroom", replacement.id) {
+		t.Fatal("replacement connection is not online")
+	}
+}
+
+func TestRoomConfigurationAndCapacity(t *testing.T) {
+	h := newHub()
+	if err := h.configureRoom("testroom", 2); err != nil {
+		t.Fatal(err)
+	}
+	first := &Client{id: "client_first01", events: make(chan []byte, 1)}
+	second := &Client{id: "client_second1", events: make(chan []byte, 1)}
+	third := &Client{id: "client_third01", events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addWSClient("testroom", second); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.addClient("testroom", third); err == nil {
+		t.Fatal("room accepted a client above its configured capacity")
+	}
+	secondUpgrade := &Client{id: second.id, events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", secondUpgrade); err != nil {
+		t.Fatalf("same device transport upgrade counted as a new member: %v", err)
+	}
+}
+
+func TestRoomConfigurationDefaultsAndValidation(t *testing.T) {
+	h := newHub()
+	room := h.roomLocked("defaultroom")
+	if room.maxClients != defaultRoomClients {
+		t.Fatalf("default max clients = %d, want %d", room.maxClients, defaultRoomClients)
+	}
+	if err := h.configureRoom("smallroom", 1); err == nil {
+		t.Fatal("accepted max clients below minimum")
+	}
+	if err := h.configureRoom("largeroom", maxRoomClients+1); err == nil {
+		t.Fatal("accepted max clients above maximum")
+	}
+	if err := h.configureRoom("defaultroom", 8); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.configureRoom("defaultroom", 9); err == nil {
+		t.Fatal("room configuration was overwritten")
+	}
+}
+
+func TestRoomConfigHandler(t *testing.T) {
+	h := newHub()
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/testroom/config", strings.NewReader(`{"max_clients":6}`))
+	rec := httptest.NewRecorder()
+	h.apiHandler(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("config status = %d, want 204: %s", rec.Code, rec.Body.String())
+	}
+	h.mu.RLock()
+	got := h.rooms["testroom"].maxClients
+	h.mu.RUnlock()
+	if got != 6 {
+		t.Fatalf("configured max clients = %d, want 6", got)
+	}
+}
+
+func assertJSONEventType(t *testing.T, client *Client, want string) {
+	t.Helper()
+	select {
+	case body, ok := <-client.events:
+		if !ok {
+			t.Fatalf("client %s closed before %s", client.id, want)
+		}
+		var event inboundEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != want {
+			t.Fatalf("event type = %q, want %q", event.Type, want)
+		}
+	default:
+		t.Fatalf("client %s did not receive %s", client.id, want)
+	}
+}
+
 func mustProofJSON(t *testing.T, h *Hub, ip string) string {
 	t.Helper()
 	challenge, payload, err := h.newPowChallenge(ip, "code")

@@ -26,13 +26,14 @@ import (
 )
 
 const (
-	maxBodyBytes  = 50 * 1024 * 1024
-	maxClients    = 100
-	clientBufSize = 64
-	pingInterval  = 25 * time.Second
-	codeLimit     = 3
-	codeWindow    = time.Minute
-	powTTL        = 2 * time.Minute
+	maxBodyBytes       = 50 * 1024 * 1024
+	defaultRoomClients = 4
+	maxRoomClients     = 100
+	clientBufSize      = 64
+	pingInterval       = 25 * time.Second
+	codeLimit          = 3
+	codeWindow         = time.Minute
+	powTTL             = 2 * time.Minute
 )
 
 var (
@@ -48,15 +49,21 @@ type Hub struct {
 	trustedProxy  []*net.IPNet
 	powSecret     []byte
 	powDifficulty int
+	leaveGrace    time.Duration
 }
 
 type Room struct {
-	sseClients map[string]*Client
-	wsClients  map[string]*Client
+	sseClients  map[string]*Client
+	wsClients   map[string]*Client
+	purgeTimers map[string]*time.Timer
+	purgeEpochs map[string]uint64
+	maxClients  int
+	configured  bool
 }
 
 type Client struct {
 	id     string
+	token  string
 	events chan []byte
 }
 
@@ -103,8 +110,13 @@ type codeJoinRequest struct {
 }
 
 type codeCreateRequest struct {
-	Code string   `json:"code"`
-	Pow  powProof `json:"pow"`
+	Code       string   `json:"code"`
+	MaxClients int      `json:"max_clients"`
+	Pow        powProof `json:"pow"`
+}
+
+type roomConfigRequest struct {
+	MaxClients int `json:"max_clients"`
 }
 
 type powProof struct {
@@ -168,6 +180,7 @@ func newHub() *Hub {
 		trustedProxy:  parseCIDRList(os.Getenv("TRUSTED_PROXIES")),
 		powSecret:     secret,
 		powDifficulty: envInt("POW_DIFFICULTY", 12),
+		leaveGrace:    30 * time.Second,
 	}
 }
 
@@ -176,9 +189,10 @@ func (h *Hub) addClient(roomID string, c *Client) error {
 	defer h.mu.Unlock()
 
 	room := h.roomLocked(roomID)
-	if len(room.sseClients)+len(room.wsClients) >= maxClients {
+	if roomAtCapacityLocked(room, c.id) {
 		return errors.New("room is full")
 	}
+	h.cancelPurgeLocked(room, c.id)
 	if old := room.sseClients[c.id]; old != nil {
 		close(old.events)
 	}
@@ -186,7 +200,7 @@ func (h *Hub) addClient(roomID string, c *Client) error {
 	return nil
 }
 
-func (h *Hub) removeClient(roomID, clientID string) bool {
+func (h *Hub) removeClient(roomID string, client *Client) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -194,15 +208,12 @@ func (h *Hub) removeClient(roomID, clientID string) bool {
 	if room == nil {
 		return false
 	}
-	c := room.sseClients[clientID]
-	if c == nil {
+	if room.sseClients[client.id] != client {
 		return false
 	}
-	delete(room.sseClients, clientID)
-	close(c.events)
-	if len(room.sseClients)+len(room.wsClients) == 0 {
-		delete(h.rooms, roomID)
-	}
+	delete(room.sseClients, client.id)
+	close(client.events)
+	h.schedulePurgeLocked(roomID, room, client.id)
 	return true
 }
 
@@ -212,7 +223,7 @@ func (h *Hub) broadcast(roomID string, msg []byte) {
 
 	room := h.roomLocked(roomID)
 	h.broadcastToSSELocked(room, nil, msg)
-	if len(room.sseClients)+len(room.wsClients) == 0 {
+	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
 		delete(h.rooms, roomID)
 	}
 }
@@ -221,8 +232,11 @@ func (h *Hub) roomLocked(roomID string) *Room {
 	room := h.rooms[roomID]
 	if room == nil {
 		room = &Room{
-			sseClients: make(map[string]*Client),
-			wsClients:  make(map[string]*Client),
+			sseClients:  make(map[string]*Client),
+			wsClients:   make(map[string]*Client),
+			purgeTimers: make(map[string]*time.Timer),
+			purgeEpochs: make(map[string]uint64),
+			maxClients:  defaultRoomClients,
 		}
 		h.rooms[roomID] = room
 	}
@@ -232,6 +246,15 @@ func (h *Hub) roomLocked(roomID string) *Room {
 	if room.wsClients == nil {
 		room.wsClients = make(map[string]*Client)
 	}
+	if room.purgeTimers == nil {
+		room.purgeTimers = make(map[string]*time.Timer)
+	}
+	if room.purgeEpochs == nil {
+		room.purgeEpochs = make(map[string]uint64)
+	}
+	if room.maxClients == 0 {
+		room.maxClients = defaultRoomClients
+	}
 	return room
 }
 
@@ -240,9 +263,10 @@ func (h *Hub) addWSClient(roomID string, c *Client) error {
 	defer h.mu.Unlock()
 
 	room := h.roomLocked(roomID)
-	if len(room.sseClients)+len(room.wsClients) >= maxClients {
+	if roomAtCapacityLocked(room, c.id) {
 		return errors.New("room is full")
 	}
+	h.cancelPurgeLocked(room, c.id)
 	if old := room.wsClients[c.id]; old != nil {
 		close(old.events)
 	}
@@ -250,7 +274,47 @@ func (h *Hub) addWSClient(roomID string, c *Client) error {
 	return nil
 }
 
-func (h *Hub) removeWSClient(roomID, clientID string) bool {
+func roomAtCapacityLocked(room *Room, clientID string) bool {
+	if room.sseClients[clientID] != nil || room.wsClients[clientID] != nil {
+		return false
+	}
+	ids := make(map[string]struct{}, len(room.sseClients)+len(room.wsClients))
+	for id := range room.sseClients {
+		ids[id] = struct{}{}
+	}
+	for id := range room.wsClients {
+		ids[id] = struct{}{}
+	}
+	return len(ids) >= room.maxClients
+}
+
+func validRoomMaxClients(value int) bool {
+	return value >= 2 && value <= maxRoomClients
+}
+
+func normalizedRoomMaxClients(value int) int {
+	if value == 0 {
+		return defaultRoomClients
+	}
+	return value
+}
+
+func (h *Hub) configureRoom(roomID string, maxClients int) error {
+	if !validRoomMaxClients(maxClients) {
+		return errors.New("max clients must be between 2 and 100")
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	room := h.roomLocked(roomID)
+	if room.configured || len(room.sseClients)+len(room.wsClients) > 0 {
+		return errors.New("room is already configured")
+	}
+	room.maxClients = maxClients
+	room.configured = true
+	return nil
+}
+
+func (h *Hub) removeWSClient(roomID string, client *Client) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -258,16 +322,99 @@ func (h *Hub) removeWSClient(roomID, clientID string) bool {
 	if room == nil {
 		return false
 	}
-	c := room.wsClients[clientID]
-	if c == nil {
+	if room.wsClients[client.id] != client {
 		return false
 	}
-	delete(room.wsClients, clientID)
-	close(c.events)
-	if len(room.sseClients)+len(room.wsClients) == 0 {
-		delete(h.rooms, roomID)
+	delete(room.wsClients, client.id)
+	close(client.events)
+	h.schedulePurgeLocked(roomID, room, client.id)
+	return true
+}
+
+func (h *Hub) cancelPurgeLocked(room *Room, clientID string) {
+	room.purgeEpochs[clientID]++
+	if timer := room.purgeTimers[clientID]; timer != nil {
+		timer.Stop()
+		delete(room.purgeTimers, clientID)
+	}
+}
+
+func (h *Hub) schedulePurgeLocked(roomID string, room *Room, clientID string) {
+	if room.sseClients[clientID] != nil || room.wsClients[clientID] != nil {
+		return
+	}
+	room.purgeEpochs[clientID]++
+	epoch := room.purgeEpochs[clientID]
+	if timer := room.purgeTimers[clientID]; timer != nil {
+		timer.Stop()
+	}
+	room.purgeTimers[clientID] = time.AfterFunc(h.leaveGrace, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		current := h.rooms[roomID]
+		if current == nil || current.purgeEpochs[clientID] != epoch || current.sseClients[clientID] != nil || current.wsClients[clientID] != nil {
+			return
+		}
+		delete(current.purgeTimers, clientID)
+		h.broadcastPeerPurgeLocked(roomID, current, clientID)
+		if len(current.sseClients)+len(current.wsClients) == 0 && len(current.purgeTimers) == 0 {
+			delete(h.rooms, roomID)
+		}
+	})
+}
+
+func (h *Hub) broadcastPeerPurgeLocked(roomID string, room *Room, clientID string) {
+	jsonBody := []byte(fmt.Sprintf(`{"type":"peer_purge","room":%q,"from":%q}`, roomID, clientID))
+	h.broadcastToSSELocked(room, nil, jsonBody)
+	wsBody, err := msgpack.Marshal(wsEnvelope{Type: "peer_purge", Room: roomID, From: clientID, Protocol: 2})
+	if err == nil {
+		h.broadcastToWSLocked(room, nil, wsBody)
+	}
+}
+
+func (h *Hub) explicitAction(roomID, clientID, token string, wsClient *Client, leave bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	room := h.rooms[roomID]
+	if room == nil {
+		return false
+	}
+	client := wsClient
+	if client == nil {
+		client = room.sseClients[clientID]
+		if client == nil || client.token == "" || client.token != token {
+			return false
+		}
+	} else if room.wsClients[clientID] != client {
+		return false
+	}
+	h.cancelPurgeLocked(room, clientID)
+	h.broadcastPeerPurgeLocked(roomID, room, clientID)
+	if leave {
+		if wsClient == nil {
+			delete(room.sseClients, clientID)
+		} else {
+			delete(room.wsClients, clientID)
+		}
+		close(client.events)
+		jsonLeave := []byte(fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q}`, roomID, clientID))
+		h.broadcastToSSELocked(room, nil, jsonLeave)
+		wsLeave, err := msgpack.Marshal(wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 2})
+		if err == nil {
+			h.broadcastToWSLocked(room, nil, wsLeave)
+		}
+		if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
+			delete(h.rooms, roomID)
+		}
 	}
 	return true
+}
+
+func (h *Hub) clientOnline(roomID, clientID string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	room := h.rooms[roomID]
+	return room != nil && (room.sseClients[clientID] != nil || room.wsClients[clientID] != nil)
 }
 
 func (h *Hub) broadcastWS(roomID string, msg []byte) {
@@ -276,7 +423,7 @@ func (h *Hub) broadcastWS(roomID string, msg []byte) {
 
 	room := h.roomLocked(roomID)
 	h.broadcastToWSLocked(room, nil, msg)
-	if len(room.sseClients)+len(room.wsClients) == 0 {
+	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
 		delete(h.rooms, roomID)
 	}
 }
@@ -288,7 +435,7 @@ func (h *Hub) dispatchSSE(roomID string, event inboundEvent, msg []byte) {
 	room := h.roomLocked(roomID)
 	targets := eventTargets(event.Type, event.From, event.To)
 	h.broadcastToSSELocked(room, targets, msg)
-	if len(room.sseClients)+len(room.wsClients) == 0 {
+	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
 		delete(h.rooms, roomID)
 	}
 }
@@ -300,7 +447,7 @@ func (h *Hub) dispatchWS(roomID string, event wsEnvelope, msg []byte) {
 	room := h.roomLocked(roomID)
 	targets := eventTargets(event.Type, event.From, event.To)
 	h.broadcastToWSLocked(room, targets, msg)
-	if len(room.sseClients)+len(room.wsClients) == 0 {
+	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
 		delete(h.rooms, roomID)
 	}
 }
@@ -449,6 +596,11 @@ func (h *Hub) createCodeRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid code", http.StatusBadRequest)
 		return
 	}
+	maxClients := normalizedRoomMaxClients(req.MaxClients)
+	if err := h.configureRoom(code, maxClients); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
 	writeJSON(w, codeRoomResponse{Code: code, URL: "/r/" + code + "#p=" + code})
 }
 
@@ -517,9 +669,28 @@ func (h *Hub) apiHandler(w http.ResponseWriter, r *http.Request) {
 		h.wsHandler(w, r, roomID)
 	case r.Method == http.MethodPost && tail == "messages":
 		h.messagesHandler(w, r, roomID)
+	case r.Method == http.MethodPost && tail == "config":
+		h.roomConfigHandler(w, r, roomID)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+func (h *Hub) roomConfigHandler(w http.ResponseWriter, r *http.Request, roomID string) {
+	var req roomConfigRequest
+	if err := readJSONBody(w, r, 1024, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := h.configureRoom(roomID, normalizedRoomMaxClients(req.MaxClients)); err != nil {
+		status := http.StatusBadRequest
+		if err.Error() == "room is already configured" {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func parseAPIRoute(path string) (roomID string, tail string, ok bool) {
@@ -536,8 +707,13 @@ func parseAPIRoute(path string) (roomID string, tail string, ok bool) {
 
 func (h *Hub) eventsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 	clientID := r.URL.Query().Get("client_id")
+	connectionToken := r.URL.Query().Get("connection_token")
 	if !clientIDRe.MatchString(clientID) {
 		http.Error(w, "invalid client id", http.StatusBadRequest)
+		return
+	}
+	if !clientIDRe.MatchString(connectionToken) {
+		http.Error(w, "invalid connection token", http.StatusBadRequest)
 		return
 	}
 
@@ -547,14 +723,14 @@ func (h *Hub) eventsHandler(w http.ResponseWriter, r *http.Request, roomID strin
 		return
 	}
 
-	client := &Client{id: clientID, events: make(chan []byte, clientBufSize)}
+	client := &Client{id: clientID, token: connectionToken, events: make(chan []byte, clientBufSize)}
 	if err := h.addClient(roomID, client); err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 	defer func() {
-		removed := h.removeClient(roomID, clientID)
-		if removed {
+		removed := h.removeClient(roomID, client)
+		if removed && !h.clientOnline(roomID, clientID) {
 			leave := fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q}`, roomID, clientID)
 			h.broadcast(roomID, []byte(leave))
 		}
@@ -624,6 +800,16 @@ func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID str
 		http.Error(w, "invalid recipient", http.StatusBadRequest)
 		return
 	}
+	if event.Type == "purge_self" || event.Type == "leave_room" {
+		connectionToken := r.Header.Get("X-Connection-Token")
+		if event.From == "" || !h.explicitAction(roomID, event.From, connectionToken, nil, event.Type == "leave_room") {
+			http.Error(w, "unauthorized sender", http.StatusUnauthorized)
+			return
+		}
+		log.Printf("dispatch room=%s type=%s", roomID, event.Type)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	h.dispatchSSE(roomID, event, body)
 	log.Printf("dispatch room=%s type=%s", roomID, event.Type)
@@ -656,8 +842,8 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 		return
 	}
 	defer func() {
-		removed := h.removeWSClient(roomID, clientID)
-		if removed {
+		removed := h.removeWSClient(roomID, client)
+		if removed && !h.clientOnline(roomID, clientID) {
 			leave := wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 2}
 			if body, err := msgpack.Marshal(leave); err == nil {
 				h.broadcastWS(roomID, body)
@@ -721,6 +907,15 @@ func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *webso
 			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2, AckID: event.MsgID})
 			continue
 		}
+		if event.Type == "purge_self" || event.Type == "leave_room" {
+			if !h.explicitAction(roomID, client.id, "", client, event.Type == "leave_room") {
+				enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2})
+			}
+			if event.Type == "leave_room" {
+				return
+			}
+			continue
+		}
 
 		ackType := "server_ack"
 		if event.Type == "chunk" {
@@ -772,7 +967,7 @@ func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
 
 func validEventType(t string) bool {
 	switch t {
-	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack":
+	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "purge_self", "leave_room":
 		return true
 	default:
 		return false
@@ -781,7 +976,7 @@ func validEventType(t string) bool {
 
 func validWSEventType(t string) bool {
 	switch t {
-	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "chunk":
+	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "chunk", "purge_self", "leave_room":
 		return true
 	default:
 		return false

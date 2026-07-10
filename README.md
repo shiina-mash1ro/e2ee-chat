@@ -103,6 +103,7 @@ GET  /
 GET  /r/{room_id}
 GET  /api/rooms/{room_id}/events?client_id=xxx
 POST /api/rooms/{room_id}/messages
+POST /api/rooms/{room_id}/config
 ```
 
 SSE 输出：
@@ -122,6 +123,9 @@ hello
 peer_hello
 group_msg
 private_msg
+purge_self
+leave_room
+peer_purge
 ```
 
 ## 后端限制
@@ -131,9 +135,12 @@ private_msg
 - `client_id` 只允许 `[a-zA-Z0-9_-]`，长度 8 到 96。
 - 创建或加入群聊码按客户端 IP 限制为每分钟 3 次。
 - 创建或加入群聊码需要 PoW，有效期 2 分钟，服务端无状态校验 challenge。
-- 每个 room 最多 100 个在线 client。
+- 创建房间时可设置最大人数（2-100，默认 4，包含创建者）；服务端按唯一设备 ID 执行限制。
 - SSE ping 间隔 25 秒。
+- 回落到 SSE 后会持续尝试恢复 WebSocket，失败间隔从 5 秒退避到最多 2 分钟；收发消息、恢复联网或页面重新可见会提前唤醒探测。
 - 空 room 在最后一个 client 离开后删除。
+- 连接异常断开后保留 30 秒重连宽限期；超时会广播 `peer_purge`，要求在线客户端删除该设备发送的消息。
+- SSE 连接需要独立的 `connection_token`，破坏性操作同时校验设备 ID 与连接令牌。
 - 不记录消息 body，日志只记录 room_id 和事件类型。
 - CORS 默认关闭，只允许同源浏览器请求。
 

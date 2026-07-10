@@ -34,8 +34,13 @@
                   <template #unchecked>关</template>
                 </n-switch>
               </div>
+              <div class="room-limit-control">
+                <span>最大人数</span>
+                <n-input-number v-model:value="roomMaxClients" :min="2" :max="100" :precision="0" size="small" />
+                <small>包含创建者，默认 4 人</small>
+              </div>
               <n-space>
-                <n-button type="primary" size="large" @click="createRoom">创建大力房间</n-button>
+                <n-button type="primary" size="large" :loading="roomCreateBusy" @click="createRoom">创建大力房间</n-button>
                 <n-button size="large" :loading="codeBusy" @click="createCodeRoom">创建随机码房间</n-button>
               </n-space>
 
@@ -215,6 +220,10 @@
                               class="attachment-image"
                               :src="fileObjectUrl(message.file)"
                               :alt="message.file.name"
+                              role="button"
+                              tabindex="0"
+                              @click="openImagePreview(message.file)"
+                              @keydown.enter.prevent="openImagePreview(message.file)"
                             />
                             <a class="attachment-link" :href="fileObjectUrl(message.file)" :download="message.file.name">
                               <span>{{ isImageFile(message.file) ? "查看/下载图片" : "下载文件" }}</span>
@@ -241,32 +250,49 @@
 
                 <n-form class="composer" @submit.prevent="sendMessage">
                   <input ref="fileInputRef" class="file-input" type="file" @change="onFileSelected" />
-                  <n-button attr-type="button" :disabled="!canSend" aria-label="选择图片或文件" @click="chooseFile">📎</n-button>
-                  <n-popover trigger="click" placement="top-start">
-                    <template #trigger>
-                      <n-button attr-type="button" :disabled="!canSend" aria-label="插入 emoji">😀</n-button>
-                    </template>
-                    <div class="emoji-grid">
-                      <button v-for="emoji in emojiList" :key="emoji" type="button" @click="insertEmoji(emoji)">
-                        {{ emoji }}
-                      </button>
-                    </div>
-                  </n-popover>
-                  <n-input
-                    v-model:value="draft"
-                    :disabled="!canSend"
-                    type="textarea"
-                    :autosize="{ minRows: 1, maxRows: 6 }"
-                    maxlength="4096"
-                    placeholder="输入消息"
-                    clearable
-                    @paste="onMessagePaste"
-                    @keydown.enter.exact.prevent="sendMessage"
-                  />
-                  <n-button attr-type="button" :disabled="!canSendCode" @click="sendCodeBlock">代码</n-button>
-                  <n-button type="primary" attr-type="submit" :disabled="!canSubmit" :title="sendDisabledReason">
-                    {{ selectedPeer ? `私发给 ${displayNameFor(selectedPeer)}` : "发送群聊" }}
-                  </n-button>
+                  <div class="composer-input-row">
+                    <n-input
+                      v-model:value="draft"
+                      :disabled="!canSend"
+                      type="textarea"
+                      :autosize="{ minRows: 1, maxRows: 6 }"
+                      maxlength="4096"
+                      placeholder="输入消息"
+                      clearable
+                      @paste="onMessagePaste"
+                      @keydown.enter.exact.prevent="sendMessage"
+                    />
+                    <n-button class="composer-send" type="primary" attr-type="submit" :disabled="!canSubmit" :title="sendDisabledReason">
+                      {{ selectedPeer ? `私发给 ${displayNameFor(selectedPeer)}` : "发送群聊" }}
+                    </n-button>
+                  </div>
+                  <div class="composer-tools">
+                    <n-button attr-type="button" :disabled="!canSend" aria-label="选择图片或文件" @click="chooseFile">📎</n-button>
+                    <n-popover trigger="click" placement="top-start">
+                      <template #trigger>
+                        <n-button attr-type="button" :disabled="!canSend" aria-label="插入 emoji">😀</n-button>
+                      </template>
+                      <div class="emoji-grid">
+                        <button v-for="emoji in emojiList" :key="emoji" type="button" @click="insertEmoji(emoji)">
+                          {{ emoji }}
+                        </button>
+                      </div>
+                    </n-popover>
+                    <n-button
+                      attr-type="button"
+                      :type="codeMode ? 'primary' : 'default'"
+                      :disabled="!canToggleCodeMode"
+                      :aria-pressed="codeMode"
+                      aria-label="切换代码模式"
+                      @click="codeMode = !codeMode"
+                    >&lt;/&gt;</n-button>
+                    <n-popconfirm positive-text="确认" negative-text="取消" @positive-click="purgeOwnMessages">
+                      <template #trigger>
+                        <n-button attr-type="button" :loading="roomActionBusy" aria-label="一键鸵鸟">🦤</n-button>
+                      </template>
+                      删除你在所有在线成员聊天区中的消息，但继续留在房间？
+                    </n-popconfirm>
+                  </div>
                 </n-form>
               </section>
             </div>
@@ -301,6 +327,39 @@
                 </div>
               </n-drawer-content>
             </n-drawer>
+            <n-modal v-model:show="imagePreviewVisible" class="image-preview-modal" :mask-closable="true" @after-leave="finalizeImagePreviewClose">
+              <div class="image-preview-card">
+                <div
+                  ref="imagePreviewStageRef"
+                  class="image-preview-stage"
+                  :class="{ pannable: imagePreviewScale > 1, dragging: imagePreviewDragging }"
+                  @wheel.prevent="onImagePreviewWheel"
+                  @pointerdown="startImagePreviewPan"
+                  @pointermove="moveImagePreviewPan"
+                  @pointerup="endImagePreviewPan"
+                  @pointercancel="endImagePreviewPan"
+                  @dblclick="resetImagePreviewTransform"
+                >
+                  <img
+                    :src="imagePreviewUrl"
+                    :alt="imagePreviewName"
+                    :style="imagePreviewTransform"
+                    draggable="false"
+                  />
+                </div>
+                <div class="image-preview-actions">
+                  <strong>{{ imagePreviewName }}</strong>
+                  <div class="image-preview-zoom" aria-label="图片缩放控制">
+                    <n-button size="small" aria-label="缩小图片" :disabled="imagePreviewScale <= 0.5" @click="zoomImagePreview(-0.25)">−</n-button>
+                    <span>{{ Math.round(imagePreviewScale * 100) }}%</span>
+                    <n-button size="small" aria-label="放大图片" :disabled="imagePreviewScale >= 5" @click="zoomImagePreview(0.25)">＋</n-button>
+                    <n-button size="small" @click="resetImagePreviewTransform">重置</n-button>
+                  </div>
+                  <a :href="imagePreviewUrl" :download="imagePreviewName">下载原图</a>
+                  <n-button size="small" @click="closeImagePreview">关闭</n-button>
+                </div>
+              </div>
+            </n-modal>
           </section>
         </n-layout-content>
       </n-layout>
@@ -312,7 +371,7 @@
 import { decode, encode } from "@msgpack/msgpack";
 import sodium from "libsodium-wrappers";
 import { darkTheme } from "naive-ui";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 
 const roomId = ref("");
 const roomSecret = ref(null);
@@ -324,12 +383,12 @@ const selectedPeer = ref("");
 const offlinePrivatePeers = ref(new Map());
 const transport = ref(null);
 const transportMode = ref("");
-const wsRetryTimer = ref(null);
 const notice = ref("");
 const safetyCode = ref("");
 const connectionState = ref("未连接");
 const messages = ref([]);
 const draft = ref("");
+const codeMode = ref(false);
 const messageScrollRef = ref(null);
 const fileInputRef = ref(null);
 const selectedFile = ref(null);
@@ -342,18 +401,36 @@ const displayName = ref("");
 const pendingName = ref("");
 const nameModalVisible = ref(false);
 const codeBusy = ref(false);
+const roomCreateBusy = ref(false);
+const roomMaxClients = ref(4);
 const memberDrawerVisible = ref(false);
 const detailVisible = ref(false);
 const darkMode = ref(readInitialDarkMode());
 const notificationsEnabled = ref(notificationSupported() && localStorage.getItem("e2ee-chat-notifications") === "1" && Notification.permission === "granted");
 const notificationPermission = ref(notificationSupported() ? Notification.permission : "unsupported");
-const windowFocused = ref(typeof document === "undefined" ? true : document.hasFocus());
+const roomActionBusy = ref(false);
+const imagePreviewVisible = ref(false);
+const imagePreviewUrl = ref("");
+const imagePreviewName = ref("");
+const imagePreviewStageRef = ref(null);
+const imagePreviewScale = ref(1);
+const imagePreviewOffsetX = ref(0);
+const imagePreviewOffsetY = ref(0);
+const imagePreviewDragging = ref(false);
 let messageSeq = 0;
+let notificationSeq = 0;
+let sessionEpoch = 0;
+let connectionToken = "";
+let activeSendOperations = 0;
+let pendingWSUpgrade = null;
+let imagePreviewPan = null;
 let cryptoWorker = null;
 let cryptoJobSeq = 0;
 const maxFileBytes = 20 * 1024 * 1024;
 const fallbackMaxFileBytes = 5 * 1024 * 1024;
 const wsConnectTimeoutMs = 3000;
+const wsActivityCooldownMs = 5000;
+const wsRetryDelaysMs = [5000, 10000, 20000, 40000, 80000, 120000];
 const textAckTimeoutMs = 5000;
 const chunkAckTimeoutMs = 15000;
 const chunkSize = 256 * 1024;
@@ -363,6 +440,15 @@ const incomingTransfers = new Map();
 const fileUrlCache = new WeakMap();
 const createdFileUrls = new Set();
 const cryptoJobs = new Map();
+const wsRecovery = {
+  timer: null,
+  probeTimeout: null,
+  probe: null,
+  failures: 0,
+  lastAttemptAt: 0,
+  nextAttemptAt: 0,
+  epoch: 0,
+};
 const userPalette = [
   { color: "#176b87", background: "#e7f5f8", border: "#9ed7e1" },
   { color: "#7a4e10", background: "#fff2d8", border: "#e9c46a" },
@@ -397,7 +483,7 @@ const emojiList = [
 const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && transport.value));
 const selectedPeerOffline = computed(() => Boolean(selectedPeer.value && !peers.value.has(selectedPeer.value)));
 const canSubmit = computed(() => canSend.value && !selectedPeerOffline.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
-const canSendCode = computed(() => canSend.value && !selectedPeerOffline.value && Boolean(draft.value) && !selectedFile.value);
+const canToggleCodeMode = computed(() => canSend.value && !selectedPeerOffline.value && !selectedFile.value);
 const sendDisabledReason = computed(() => (selectedPeerOffline.value ? "私聊对象已断开，请重新选择私聊对象或切回群聊" : ""));
 const validJoinCode = computed(() => isValidCode(joinCode.value));
 const validCustomCode = computed(() => isValidCode(customCode.value));
@@ -407,6 +493,9 @@ const notificationButtonText = computed(() => {
   if (!notificationSupported()) return "通知不可用";
   return notificationsEnabled.value ? "通知开" : "通知关";
 });
+const imagePreviewTransform = computed(() => ({
+  transform: `translate(${imagePreviewOffsetX.value}px, ${imagePreviewOffsetY.value}px) scale(${imagePreviewScale.value})`,
+}));
 
 watch(darkMode, applyTheme, { immediate: true });
 
@@ -416,24 +505,20 @@ sodium.ready.then(() => {
 }).catch(showError);
 
 onBeforeUnmount(() => {
+  sessionEpoch += 1;
+  cancelWSRecovery();
   transport.value?.close();
-  clearWSRetry();
   clearPendingTimers();
   cryptoWorker?.terminate();
   cryptoWorker = null;
   revokeSelectedFileUrl();
   revokeFileObjectUrls();
-  window.removeEventListener("focus", updateWindowFocus);
-  window.removeEventListener("blur", updateWindowFocus);
-  document.removeEventListener("visibilitychange", updateWindowFocus);
+  window.removeEventListener("online", wakeWSRecovery);
+  document.removeEventListener("visibilitychange", handleVisibilityRecovery);
 });
 
-onMounted(() => {
-  updateWindowFocus();
-  window.addEventListener("focus", updateWindowFocus);
-  window.addEventListener("blur", updateWindowFocus);
-  document.addEventListener("visibilitychange", updateWindowFocus);
-});
+window.addEventListener("online", wakeWSRecovery);
+document.addEventListener("visibilitychange", handleVisibilityRecovery);
 
 function boot() {
   const parsedRoomId = parseRoomId(location.pathname);
@@ -475,17 +560,34 @@ function confirmName() {
 }
 
 function startChatSession() {
-  deviceId.value = `dev_${base64Url(sodium.randombytes_buf(12))}`;
+  const storageKey = `e2ee-chat-device:${roomId.value}`;
+  const savedDeviceId = sessionStorage.getItem(storageKey) || "";
+  deviceId.value = validDeviceId(savedDeviceId) ? savedDeviceId : `dev_${base64Url(sodium.randombytes_buf(12))}`;
+  sessionStorage.setItem(storageKey, deviceId.value);
+  connectionToken = `conn_${base64Url(sodium.randombytes_buf(18))}`;
   keyPair.value = sodium.crypto_box_keypair();
   getCryptoWorker();
   connectEvents();
 }
 
-function createRoom() {
-  if (!cryptoReady.value) return;
+async function createRoom() {
+  if (!cryptoReady.value || roomCreateBusy.value) return;
+  roomCreateBusy.value = true;
   const newRoomId = base64Url(sodium.randombytes_buf(12));
   const secret = sodium.randombytes_buf(32);
-  location.href = `/r/${newRoomId}#k=${base64Url(secret)}`;
+  try {
+    const response = await fetch(`/api/rooms/${encodeURIComponent(newRoomId)}/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ max_clients: normalizedRoomMaxClients() }),
+    });
+    if (!response.ok) throw new Error(`创建房间失败：HTTP ${response.status}`);
+    location.href = `/r/${newRoomId}#k=${base64Url(secret)}`;
+  } catch (err) {
+    showError(err);
+  } finally {
+    roomCreateBusy.value = false;
+  }
 }
 
 function createCodeRoom() {
@@ -515,7 +617,9 @@ async function requestCodeRoom(method, code = "") {
     const response = await fetch("/api/code-room", {
       method,
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(code ? { code, pow } : { pow }),
+      body: JSON.stringify(method === "POST"
+        ? { ...(code ? { code } : {}), max_clients: normalizedRoomMaxClients(), pow }
+        : { code, pow }),
     });
     if (response.status === 429) {
       const retryAfter = Number(response.headers.get("Retry-After") || 60);
@@ -527,6 +631,11 @@ async function requestCodeRoom(method, code = "") {
   } finally {
     codeBusy.value = false;
   }
+}
+
+function normalizedRoomMaxClients() {
+  const value = Math.round(Number(roomMaxClients.value) || 4);
+  return Math.min(100, Math.max(2, value));
 }
 
 async function solvePowChallenge() {
@@ -595,10 +704,11 @@ function deriveCodeSecret(code) {
 }
 
 function connectEvents() {
+  const epoch = ++sessionEpoch;
+  cancelWSRecovery();
   transport.value?.close();
   transport.value = null;
   transportMode.value = "";
-  clearWSRetry();
   connectionState.value = "连接中";
 
   let settled = false;
@@ -607,15 +717,16 @@ function connectEvents() {
     if (settled) return;
     settled = true;
     wsTransport?.close();
-    startSSETransport();
+    startSSETransport(epoch);
   }, wsConnectTimeoutMs);
 
   wsTransport = createWebSocketTransport({
+    epoch,
     onReady: () => {
       if (settled) return;
       settled = true;
       clearTimeout(fallbackTimer);
-      clearWSRetry();
+      cancelWSRecovery(false);
       transport.value = wsTransport;
       transportMode.value = "ws";
       connectionState.value = "已连接";
@@ -626,7 +737,7 @@ function connectEvents() {
       settled = true;
       clearTimeout(fallbackTimer);
       wsTransport?.close();
-      startSSETransport();
+      startSSETransport(epoch);
     },
     onEvent: dispatchWireEvent,
     onState: (state) => {
@@ -635,68 +746,140 @@ function connectEvents() {
   });
 }
 
-function startSSETransport() {
-  if (transport.value?.mode === "sse") return;
+function startSSETransport(epoch = sessionEpoch, resetRecovery = true) {
+  if (epoch !== sessionEpoch) return;
+  if (transport.value?.mode === "sse") {
+    if (resetRecovery) startWSRecovery(epoch);
+    return;
+  }
   transport.value?.close();
-  const sseTransport = createSSETransport({
+  let sseTransport = null;
+  sseTransport = createSSETransport({
+    epoch,
     onOpen: () => {
+      if (epoch !== sessionEpoch) return;
       transport.value = sseTransport;
       transportMode.value = "sse";
       connectionState.value = "已连接（兼容模式）";
       sendHello().catch(showError);
+      if (resetRecovery) startWSRecovery(epoch);
     },
     onEvent: dispatchWireEvent,
     onState: (state) => {
-      connectionState.value = state;
+      if (transport.value === sseTransport) connectionState.value = state;
     },
   });
-  scheduleWSRetry();
 }
 
-function scheduleWSRetry() {
-  clearWSRetry();
-  wsRetryTimer.value = setTimeout(() => {
-    wsRetryTimer.value = null;
-    if (!roomId.value || !deviceId.value || transportMode.value === "ws") return;
-    let retrySettled = false;
-    const retryTransport = createWebSocketTransport({
-      onReady: () => {
-        if (retrySettled) return;
-        retrySettled = true;
-        clearWSRetry();
-        const oldTransport = transport.value;
-        transport.value = retryTransport;
-        transportMode.value = "ws";
-        oldTransport?.close();
-        connectionState.value = "已连接";
-        sendHello().catch(showError);
-      },
-      onFallback: () => {
-        if (retrySettled) return;
-        retrySettled = true;
-        retryTransport.close();
-        scheduleWSRetry();
-      },
-      onEvent: dispatchWireEvent,
-      onState: () => {},
-    });
-    setTimeout(() => {
-      if (retrySettled || transportMode.value === "ws") return;
-      retrySettled = true;
-      retryTransport.close();
-      scheduleWSRetry();
-    }, wsConnectTimeoutMs);
-  }, 5000);
+function startWSRecovery(epoch = sessionEpoch) {
+  cancelWSRecovery();
+  wsRecovery.epoch = epoch;
+  wsRecovery.failures = 0;
+  wsRecovery.lastAttemptAt = 0;
+  scheduleWSRecovery(wsRetryDelaysMs[0], epoch);
 }
 
-function clearWSRetry() {
-  if (wsRetryTimer.value) {
-    clearTimeout(wsRetryTimer.value);
-    wsRetryTimer.value = null;
+function scheduleWSRecovery(delayMs, epoch = wsRecovery.epoch) {
+  if (epoch !== sessionEpoch || transportMode.value !== "sse") return;
+  if (wsRecovery.timer) clearTimeout(wsRecovery.timer);
+  if (navigator.onLine === false) {
+    wsRecovery.timer = null;
+    wsRecovery.nextAttemptAt = 0;
+    return;
   }
+  const delay = Math.max(0, delayMs);
+  wsRecovery.nextAttemptAt = Date.now() + delay;
+  wsRecovery.timer = setTimeout(() => {
+    wsRecovery.timer = null;
+    attemptWSRecovery(epoch);
+  }, delay);
 }
 
-function createWebSocketTransport({ onReady, onFallback, onEvent, onState }) {
+function attemptWSRecovery(epoch = wsRecovery.epoch) {
+  if (epoch !== sessionEpoch || transportMode.value !== "sse" || wsRecovery.probe || pendingWSUpgrade) return;
+  if (navigator.onLine === false) return;
+  wsRecovery.lastAttemptAt = Date.now();
+  connectionState.value = "已连接（兼容模式，正在尝试 WebSocket）";
+
+  const probe = { epoch, transport: null, settled: false };
+  const fail = () => finishWSProbeFailure(probe);
+  probe.transport = createWebSocketTransport({
+    epoch,
+    onReady: () => {
+      if (probe.settled || wsRecovery.probe !== probe || epoch !== sessionEpoch) return;
+      probe.settled = true;
+      clearTimeout(wsRecovery.probeTimeout);
+      wsRecovery.probeTimeout = null;
+      wsRecovery.probe = null;
+      if (activeSendOperations > 0) {
+        pendingWSUpgrade = probe;
+        connectionState.value = "已连接（兼容模式，WebSocket 就绪）";
+        return;
+      }
+      promoteWSProbe(probe);
+    },
+    onFallback: fail,
+    onEvent: dispatchWireEvent,
+    onState: () => {},
+  });
+  wsRecovery.probe = probe;
+  wsRecovery.probeTimeout = setTimeout(fail, wsConnectTimeoutMs);
+}
+
+function finishWSProbeFailure(probe) {
+  if (probe.settled || wsRecovery.probe !== probe) return;
+  probe.settled = true;
+  clearTimeout(wsRecovery.probeTimeout);
+  wsRecovery.probeTimeout = null;
+  wsRecovery.probe = null;
+  probe.transport?.close();
+  if (probe.epoch !== sessionEpoch || transportMode.value !== "sse") return;
+  connectionState.value = "已连接（兼容模式）";
+  wsRecovery.failures += 1;
+  const delay = wsRetryDelaysMs[Math.min(wsRecovery.failures, wsRetryDelaysMs.length - 1)];
+  scheduleWSRecovery(delay, probe.epoch);
+}
+
+function promoteWSProbe(probe) {
+  if (probe.epoch !== sessionEpoch || transportMode.value !== "sse") {
+    probe.transport?.close();
+    return;
+  }
+  pendingWSUpgrade = null;
+  const oldTransport = transport.value;
+  transport.value = probe.transport;
+  transportMode.value = "ws";
+  connectionState.value = "已连接";
+  cancelWSRecovery(false);
+  oldTransport?.close();
+  sendHello().catch(showError);
+}
+
+function wakeWSRecovery() {
+  if (transportMode.value !== "sse" || wsRecovery.probe || pendingWSUpgrade) return;
+  const cooldown = Math.max(0, wsActivityCooldownMs - (Date.now() - wsRecovery.lastAttemptAt));
+  scheduleWSRecovery(cooldown, sessionEpoch);
+}
+
+function handleVisibilityRecovery() {
+  if (document.visibilityState === "visible") wakeWSRecovery();
+}
+
+function cancelWSRecovery(closeProbe = true) {
+  if (wsRecovery.timer) clearTimeout(wsRecovery.timer);
+  if (wsRecovery.probeTimeout) clearTimeout(wsRecovery.probeTimeout);
+  wsRecovery.timer = null;
+  wsRecovery.probeTimeout = null;
+  wsRecovery.nextAttemptAt = 0;
+  if (closeProbe) {
+    wsRecovery.probe?.transport?.close();
+    pendingWSUpgrade?.transport?.close();
+  }
+  wsRecovery.probe = null;
+  pendingWSUpgrade = null;
+}
+
+function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState }) {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   const url = `${scheme}://${location.host}/api/rooms/${encodeURIComponent(roomId.value)}/ws?client_id=${encodeURIComponent(deviceId.value)}`;
   const socket = new WebSocket(url);
@@ -709,6 +892,7 @@ function createWebSocketTransport({ onReady, onFallback, onEvent, onState }) {
     if (!ready) onFallback();
   });
   socket.addEventListener("close", () => {
+    if (epoch !== sessionEpoch) return;
     if (!ready) {
       onFallback();
       return;
@@ -717,10 +901,11 @@ function createWebSocketTransport({ onReady, onFallback, onEvent, onState }) {
       transport.value = null;
       transportMode.value = "";
       onState("重连中");
-      startSSETransport();
+      startSSETransport(epoch);
     }
   });
   socket.addEventListener("message", (event) => {
+    if (epoch !== sessionEpoch) return;
     try {
       const wireEvent = decode(new Uint8Array(event.data));
       if (wireEvent.type === "welcome") {
@@ -750,13 +935,14 @@ function createWebSocketTransport({ onReady, onFallback, onEvent, onState }) {
   };
 }
 
-function createSSETransport({ onOpen, onEvent, onState }) {
-  const url = `/api/rooms/${encodeURIComponent(roomId.value)}/events?client_id=${encodeURIComponent(deviceId.value)}`;
+function createSSETransport({ epoch, onOpen, onEvent, onState }) {
+  const url = `/api/rooms/${encodeURIComponent(roomId.value)}/events?client_id=${encodeURIComponent(deviceId.value)}&connection_token=${encodeURIComponent(connectionToken)}`;
   const source = new EventSource(url);
-  source.addEventListener("open", onOpen);
-  source.addEventListener("error", () => onState("重连中（兼容模式）"));
-  source.addEventListener("ping", () => onState("已连接（兼容模式）"));
+  source.addEventListener("open", () => epoch === sessionEpoch && onOpen());
+  source.addEventListener("error", () => epoch === sessionEpoch && onState("重连中（兼容模式）"));
+  source.addEventListener("ping", () => epoch === sessionEpoch && onState("已连接（兼容模式）"));
   source.addEventListener("message", (event) => {
+    if (epoch !== sessionEpoch) return;
     try {
       onEvent(JSON.parse(event.data));
     } catch (err) {
@@ -816,6 +1002,9 @@ async function handleWireEvent(event) {
     case "peer_leave":
       forgetPeer(event.from);
       break;
+    case "peer_purge":
+      purgeMessagesFrom(event.from);
+      break;
     case "server_ack":
     case "chunk_ack":
       handleServerAck(event.ack_id);
@@ -860,32 +1049,38 @@ function forgetPeer(id) {
 }
 
 async function sendMessage() {
-  const text = draft.value.trim();
+  const text = codeMode.value ? draft.value : draft.value.trim();
   const file = selectedFile.value;
   if (!text && !file) return;
 
+  let sendContext = null;
   try {
-    await sendPayload(await makeMessagePayload(text, file));
+    sendContext = beginSendOperation();
+    const payload = codeMode.value && !file
+      ? { kind: "code", text, sent_at: Date.now() }
+      : await makeMessagePayload(text, file, sendContext.mode);
+    await sendPayload(payload, sendContext);
   } catch (err) {
     showError(err);
+  } finally {
+    if (sendContext) finishSendOperation();
   }
 }
 
-async function sendCodeBlock() {
-  if (!draft.value || selectedFile.value) return;
-
-  try {
-    await sendPayload({
-      kind: "code",
-      text: draft.value,
-      sent_at: Date.now(),
-    });
-  } catch (err) {
-    showError(err);
-  }
+function beginSendOperation() {
+  const activeTransport = transport.value;
+  if (!activeTransport) throw new Error("Not connected");
+  activeSendOperations += 1;
+  return { transport: activeTransport, mode: activeTransport.mode };
 }
 
-async function sendPayload(payload) {
+function finishSendOperation() {
+  activeSendOperations = Math.max(0, activeSendOperations - 1);
+  if (activeSendOperations === 0 && pendingWSUpgrade) promoteWSProbe(pendingWSUpgrade);
+  wakeWSRecovery();
+}
+
+async function sendPayload(payload, sendContext) {
   const to = selectedPeer.value;
   const msgId = nextMessageId();
   const localMessage = {
@@ -905,9 +1100,9 @@ async function sendPayload(payload) {
 
   try {
     if (to) {
-      await sendPrivateMessage(to, payload, msgId);
+      await sendPrivateMessage(to, payload, msgId, sendContext);
     } else {
-      await sendGroupMessage(payload, msgId);
+      await sendGroupMessage(payload, msgId, sendContext);
     }
   } catch (err) {
     markMessageFailed(msgId, err.message || String(err));
@@ -915,9 +1110,9 @@ async function sendPayload(payload) {
   }
 }
 
-async function makeMessagePayload(text, file) {
+async function makeMessagePayload(text, file, mode) {
   if (!file) return { kind: "text", text, sent_at: Date.now() };
-  const limit = transportMode.value === "sse" ? fallbackMaxFileBytes : maxFileBytes;
+  const limit = mode === "sse" ? fallbackMaxFileBytes : maxFileBytes;
   if (file.size > limit) {
     throw new Error(`File cannot exceed ${formatBytes(limit)}.`);
   }
@@ -925,11 +1120,11 @@ async function makeMessagePayload(text, file) {
     kind: "file",
     text,
     sent_at: Date.now(),
-    file: await readFilePayload(file),
+    file: await readFilePayload(file, mode),
   };
 }
 
-function readFilePayload(file) {
+function readFilePayload(file, mode) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
@@ -938,7 +1133,7 @@ function readFilePayload(file) {
         name: cleanFileName(file.name),
         type: file.type || "application/octet-stream",
         size: file.size,
-        data: transportMode.value === "ws" ? bytes : b64(bytes),
+        data: mode === "ws" ? bytes : b64(bytes),
       });
     };
     reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
@@ -946,18 +1141,18 @@ function readFilePayload(file) {
   });
 }
 
-async function sendGroupMessage(payload, msgId) {
-  const event = await encryptGroupEvent(payload, msgId);
-  await sendEncryptedEvent(event, { msgId, privateTo: "", hasFile: Boolean(payload.file) });
+async function sendGroupMessage(payload, msgId, sendContext) {
+  const event = await encryptGroupEvent(payload, msgId, sendContext.mode);
+  await sendEncryptedEvent(event, { msgId, privateTo: "", hasFile: Boolean(payload.file), ...sendContext });
 }
 
-async function sendPrivateMessage(to, payload, msgId) {
-  const event = await encryptPrivateEvent(to, payload, msgId);
-  await sendEncryptedEvent(event, { msgId, privateTo: to, hasFile: Boolean(payload.file) });
+async function sendPrivateMessage(to, payload, msgId, sendContext) {
+  const event = await encryptPrivateEvent(to, payload, msgId, sendContext.mode);
+  await sendEncryptedEvent(event, { msgId, privateTo: to, hasFile: Boolean(payload.file), ...sendContext });
 }
 
-async function encryptGroupEvent(payload, msgId) {
-  if (transportMode.value === "ws") {
+async function encryptGroupEvent(payload, msgId, mode) {
+  if (mode === "ws") {
     try {
       const { nonce, ciphertext } = await cryptoCall("groupEncrypt", {
         payload,
@@ -978,27 +1173,27 @@ async function encryptGroupEvent(payload, msgId) {
     }
   }
   const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-  const plaintext = encodePlainPayload(payload);
+  const plaintext = encodePlainPayload(payload, mode);
   const additionalData = sodium.from_string(`room:${roomId.value}`);
   const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(plaintext, additionalData, null, nonce, roomKey.value);
   return {
     type: "group_msg",
     room: roomId.value,
     from: deviceId.value,
-    protocol: transportMode.value === "ws" ? 2 : 1,
+    protocol: mode === "ws" ? 2 : 1,
     msg_id: msgId,
-    nonce: transportMode.value === "ws" ? nonce : b64(nonce),
-    ciphertext: transportMode.value === "ws" ? ciphertext : b64(ciphertext),
+    nonce: mode === "ws" ? nonce : b64(nonce),
+    ciphertext: mode === "ws" ? ciphertext : b64(ciphertext),
   };
 }
 
-async function encryptPrivateEvent(to, payload, msgId) {
+async function encryptPrivateEvent(to, payload, msgId, mode) {
   const peer = peers.value.get(to);
   if (!peer) {
     throw new Error("Missing peer public key.");
   }
   const nonce = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
-  if (transportMode.value === "ws") {
+  if (mode === "ws") {
     try {
       const { ciphertext } = await cryptoCall("privateEncrypt", {
         payload,
@@ -1020,33 +1215,33 @@ async function encryptPrivateEvent(to, payload, msgId) {
       // Fall through to main-thread encrypt.
     }
   }
-  const plaintext = encodePlainPayload(payload);
+  const plaintext = encodePlainPayload(payload, mode);
   const ciphertext = sodium.crypto_box_easy(plaintext, nonce, peer.publicKey, keyPair.value.privateKey);
   return {
     type: "private_msg",
     room: roomId.value,
     from: deviceId.value,
     to,
-    protocol: transportMode.value === "ws" ? 2 : 1,
+    protocol: mode === "ws" ? 2 : 1,
     msg_id: msgId,
-    nonce: transportMode.value === "ws" ? nonce : b64(nonce),
-    ciphertext: transportMode.value === "ws" ? ciphertext : b64(ciphertext),
+    nonce: mode === "ws" ? nonce : b64(nonce),
+    ciphertext: mode === "ws" ? ciphertext : b64(ciphertext),
   };
 }
 
-function encodePlainPayload(payload) {
-  return transportMode.value === "ws" ? encode(payload) : sodium.from_string(JSON.stringify(payload));
+function encodePlainPayload(payload, mode) {
+  return mode === "ws" ? encode(payload) : sodium.from_string(JSON.stringify(payload));
 }
 
 function decodePlainPayload(plaintext, protocol = 1) {
-  if (protocol === 2 || transportMode.value === "ws") return decode(plaintext);
+  if (protocol === 2) return decode(plaintext);
   return JSON.parse(sodium.to_string(plaintext));
 }
 
 async function decryptGroupPayload(event) {
   const nonce = decodeWireBytes(event.nonce);
   const ciphertext = decodeWireBytes(event.ciphertext);
-  if (event.protocol === 2 || transportMode.value === "ws") {
+  if (event.protocol === 2) {
     try {
       return await cryptoCall("groupDecrypt", {
         nonce,
@@ -1066,7 +1261,7 @@ async function decryptGroupPayload(event) {
 async function decryptPrivatePayload(event, peer) {
   const nonce = decodeWireBytes(event.nonce);
   const ciphertext = decodeWireBytes(event.ciphertext);
-  if (event.protocol === 2 || transportMode.value === "ws") {
+  if (event.protocol === 2) {
     try {
       return await cryptoCall("privateDecrypt", {
         nonce,
@@ -1082,28 +1277,28 @@ async function decryptPrivatePayload(event, peer) {
   return decodePlainPayload(plaintext, event.protocol);
 }
 
-async function sendEncryptedEvent(event, { msgId, privateTo, hasFile }) {
+async function sendEncryptedEvent(event, { msgId, privateTo, hasFile, transport: activeTransport, mode }) {
   registerPendingMessage(msgId, { privateTo, hasFile });
-  if (transportMode.value === "sse") {
-    await sendEvent(event);
+  if (mode === "sse") {
+    await sendEvent(event, activeTransport);
     handleMessageServerAck(msgId);
     return;
   }
-  if (transportMode.value === "ws" && hasFile) {
-    await sendChunkedEvent(event, { msgId, privateTo });
+  if (mode === "ws" && hasFile) {
+    await sendChunkedEvent(event, { msgId, privateTo, transport: activeTransport });
   } else {
     const ack = waitForServerAck(msgId, textAckTimeoutMs);
-    await sendEvent(event);
+    await sendEvent(event, activeTransport);
     await ack;
     handleMessageServerAck(msgId);
   }
 }
 
-async function sendChunkedEvent(event, { msgId }) {
+async function sendChunkedEvent(event, { msgId, transport: activeTransport }) {
   const ciphertext = asBytes(event.ciphertext);
   const total = Math.max(1, Math.ceil(ciphertext.length / chunkSize));
   for (let seq = 0; seq < total; seq += 1) {
-    await waitForSocketDrain();
+    await waitForSocketDrain(activeTransport);
     const chunkMsgId = `${msgId}:${seq}`;
     const chunk = ciphertext.slice(seq * chunkSize, Math.min(ciphertext.length, (seq + 1) * chunkSize));
     const ack = waitForServerAck(chunkMsgId, chunkAckTimeoutMs, msgId);
@@ -1120,21 +1315,21 @@ async function sendChunkedEvent(event, { msgId }) {
       total,
       nonce: event.nonce,
       ciphertext: chunk,
-    });
+    }, activeTransport);
     await ack;
   }
   handleMessageServerAck(msgId);
 }
 
-async function waitForSocketDrain() {
-  while (transport.value?.mode === "ws" && transport.value.bufferedAmount?.() > chunkSize * 2) {
+async function waitForSocketDrain(activeTransport) {
+  while (activeTransport?.mode === "ws" && activeTransport.bufferedAmount?.() > chunkSize * 2) {
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
 
-async function sendEvent(event) {
-  if (!transport.value) throw new Error("Not connected");
-  await transport.value.send(event);
+async function sendEvent(event, activeTransport = transport.value) {
+  if (!activeTransport) throw new Error("Not connected");
+  await activeTransport.send(event);
 }
 
 async function receiveGroupMessage(event) {
@@ -1146,6 +1341,7 @@ async function receiveGroupMessage(event) {
   const payload = await decryptGroupPayload(event);
   addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), mine: false, status: "delivered" });
   notifyIncomingMessage();
+  wakeWSRecovery();
 }
 
 async function receivePrivateMessage(event) {
@@ -1161,15 +1357,78 @@ async function receivePrivateMessage(event) {
   addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), privateTo: deviceId.value, mine: false, status: "delivered" });
   sendRecipientAck(msgId, event.from).catch(showError);
   notifyIncomingMessage();
+  wakeWSRecovery();
 }
 
 async function postEvent(payload) {
   const response = await fetch(`/api/rooms/${encodeURIComponent(roomId.value)}/messages`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Connection-Token": connectionToken,
+    },
     body: JSON.stringify(payload),
   });
   if (!response.ok) throw new Error(`Send failed: HTTP ${response.status}`);
+}
+
+async function purgeOwnMessages() {
+  if (!transport.value || roomActionBusy.value) return;
+  roomActionBusy.value = true;
+  try {
+    await sendEvent({
+      type: "purge_self",
+      room: roomId.value,
+      from: deviceId.value,
+      protocol: transportMode.value === "ws" ? 2 : 1,
+    });
+  } catch (err) {
+    showError(err);
+  } finally {
+    roomActionBusy.value = false;
+  }
+}
+
+async function leaveRoom() {
+  if (!transport.value || roomActionBusy.value) return;
+  roomActionBusy.value = true;
+  try {
+    await sendEvent({
+      type: "leave_room",
+      room: roomId.value,
+      from: deviceId.value,
+      protocol: transportMode.value === "ws" ? 2 : 1,
+    });
+    purgeMessagesFrom(deviceId.value);
+    await new Promise((resolve) => setTimeout(resolve, transportMode.value === "ws" ? 150 : 0));
+    sessionEpoch += 1;
+    cancelWSRecovery();
+    transport.value?.close();
+    location.href = "/";
+  } catch (err) {
+    roomActionBusy.value = false;
+    showError(err);
+  }
+}
+
+function purgeMessagesFrom(senderId) {
+  if (!senderId) return;
+  const removed = messages.value.filter((message) => !message.system && message.from === senderId);
+  for (const message of removed) revokeMessageFileUrl(message);
+  messages.value = messages.value.filter((message) => message.system || message.from !== senderId);
+  for (const [transferId, transfer] of incomingTransfers.entries()) {
+    if (transfer?.event?.from === senderId) incomingTransfers.delete(transferId);
+  }
+}
+
+function revokeMessageFileUrl(message) {
+  if (!message?.file) return;
+  const url = fileUrlCache.get(message.file);
+  if (!url) return;
+  if (imagePreviewUrl.value === url) closeImagePreview();
+  URL.revokeObjectURL(url);
+  createdFileUrls.delete(url);
+  fileUrlCache.delete(message.file);
 }
 
 function registerPendingMessage(msgId, { privateTo, hasFile }) {
@@ -1444,6 +1703,7 @@ function setSelectedFile(file) {
     return;
   }
   revokeSelectedFileUrl();
+  codeMode.value = false;
   selectedFile.value = file;
   selectedFileUrl.value = isImageLike(file.type) ? URL.createObjectURL(file) : "";
 }
@@ -1592,20 +1852,16 @@ async function toggleNotifications() {
 
 function notifyIncomingMessage() {
   if (!notificationsEnabled.value || !notificationSupported() || Notification.permission !== "granted") return;
-  if (!document.hidden && windowFocused.value) return;
   try {
+    notificationSeq += 1;
     new Notification("您收到一条信息", {
-      tag: `e2ee-chat-${roomId.value}`,
+      tag: `e2ee-chat-${roomId.value}-${Date.now()}-${notificationSeq}`,
       body: "",
     });
   } catch {
     notificationsEnabled.value = false;
     localStorage.removeItem("e2ee-chat-notifications");
   }
-}
-
-function updateWindowFocus() {
-  windowFocused.value = typeof document === "undefined" ? true : document.hasFocus();
 }
 
 function notificationSupported() {
@@ -1707,6 +1963,81 @@ function fileObjectUrl(file) {
   return url;
 }
 
+function openImagePreview(file) {
+  if (!isImageFile(file)) return;
+  resetImagePreviewTransform();
+  imagePreviewUrl.value = fileObjectUrl(file);
+  imagePreviewName.value = file.name || "图片";
+  imagePreviewVisible.value = true;
+}
+
+function closeImagePreview() {
+  imagePreviewVisible.value = false;
+}
+
+function finalizeImagePreviewClose() {
+  resetImagePreviewTransform();
+  imagePreviewUrl.value = "";
+  imagePreviewName.value = "";
+}
+
+function resetImagePreviewTransform() {
+  imagePreviewScale.value = 1;
+  imagePreviewOffsetX.value = 0;
+  imagePreviewOffsetY.value = 0;
+  imagePreviewDragging.value = false;
+  imagePreviewPan = null;
+}
+
+function zoomImagePreview(delta, originX = 0, originY = 0) {
+  const oldScale = imagePreviewScale.value;
+  const nextScale = Math.min(5, Math.max(0.5, Math.round((oldScale + delta) * 100) / 100));
+  if (nextScale === oldScale) return;
+  const ratio = nextScale / oldScale;
+  imagePreviewOffsetX.value = originX - (originX - imagePreviewOffsetX.value) * ratio;
+  imagePreviewOffsetY.value = originY - (originY - imagePreviewOffsetY.value) * ratio;
+  imagePreviewScale.value = nextScale;
+  if (nextScale <= 1) {
+    imagePreviewOffsetX.value = 0;
+    imagePreviewOffsetY.value = 0;
+  }
+}
+
+function onImagePreviewWheel(event) {
+  const stage = imagePreviewStageRef.value;
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  const originX = event.clientX - rect.left - rect.width / 2;
+  const originY = event.clientY - rect.top - rect.height / 2;
+  zoomImagePreview(event.deltaY < 0 ? 0.25 : -0.25, originX, originY);
+}
+
+function startImagePreviewPan(event) {
+  if (imagePreviewScale.value <= 1 || event.button !== 0) return;
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+  imagePreviewDragging.value = true;
+  imagePreviewPan = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    offsetX: imagePreviewOffsetX.value,
+    offsetY: imagePreviewOffsetY.value,
+  };
+}
+
+function moveImagePreviewPan(event) {
+  if (!imagePreviewPan || imagePreviewPan.pointerId !== event.pointerId) return;
+  imagePreviewOffsetX.value = imagePreviewPan.offsetX + event.clientX - imagePreviewPan.startX;
+  imagePreviewOffsetY.value = imagePreviewPan.offsetY + event.clientY - imagePreviewPan.startY;
+}
+
+function endImagePreviewPan(event) {
+  if (!imagePreviewPan || imagePreviewPan.pointerId !== event.pointerId) return;
+  event.currentTarget.releasePointerCapture?.(event.pointerId);
+  imagePreviewDragging.value = false;
+  imagePreviewPan = null;
+}
+
 function fileBytes(file) {
   if (typeof file.data === "string") {
     return sodium.from_base64(file.data, sodium.base64_variants.ORIGINAL);
@@ -1789,6 +2120,19 @@ function shortId(id) {
   gap: 12px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.room-limit-control {
+  display: grid;
+  grid-template-columns: auto 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.room-limit-control small {
+  color: var(--muted);
 }
 
 .join-code-form {
@@ -2103,6 +2447,11 @@ function shortId(id) {
   box-shadow: inset 0 0 0 1px var(--private-border);
 }
 
+.message-bubble .text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .code-block {
   display: grid;
   gap: 6px;
@@ -2205,6 +2554,88 @@ function shortId(id) {
   border: 1px solid var(--border);
   object-fit: contain;
   background: var(--surface-strong);
+  cursor: zoom-in;
+}
+
+.attachment-image:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.image-preview-modal {
+  width: min(1100px, calc(100vw - 32px));
+}
+
+.image-preview-card {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 35%);
+}
+
+.image-preview-stage {
+  display: grid;
+  place-items: center;
+  min-height: 240px;
+  height: calc(100vh - 150px);
+  max-height: 760px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-strong);
+  touch-action: none;
+  user-select: none;
+}
+
+.image-preview-stage.pannable {
+  cursor: grab;
+}
+
+.image-preview-stage.dragging {
+  cursor: grabbing;
+}
+
+.image-preview-stage > img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+  transition: transform 120ms ease-out;
+  pointer-events: none;
+}
+
+.image-preview-stage.dragging > img {
+  transition: none;
+}
+
+.image-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.image-preview-actions strong {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-preview-zoom {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.image-preview-zoom span {
+  width: 48px;
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
 }
 
 .attachment-link {
@@ -2247,11 +2678,36 @@ function shortId(id) {
 }
 
 .composer {
-  display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   padding: 14px;
   border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.composer-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
+}
+
+.composer-input-row > .n-input {
+  min-width: 0;
+  flex: 1;
+}
+
+.composer-send {
+  flex: 0 0 auto;
+  min-width: 126px;
+}
+
+.composer-tools {
+  order: -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .file-input {
@@ -2351,14 +2807,50 @@ function shortId(id) {
   }
 
   .composer {
-    grid-template-columns: auto auto minmax(0, 1fr) auto;
     gap: 8px;
     padding: 10px 10px calc(10px + env(safe-area-inset-bottom, 0px));
-    background: var(--surface);
   }
 
-  .composer :deep(.n-button[type="submit"]) {
-    grid-column: 1 / -1;
+  .composer-input-row {
+    order: -1;
+    gap: 8px;
+  }
+
+  .composer-send {
+    min-width: 94px;
+  }
+
+  .composer-tools {
+    order: 0;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .composer-tools > .n-button,
+  .composer-tools > .n-popover {
+    width: 100%;
+  }
+
+  .image-preview-modal {
+    width: calc(100vw - 16px);
+  }
+
+  .image-preview-card {
+    padding: 8px;
+  }
+
+  .image-preview-stage {
+    height: calc(100vh - 190px);
+  }
+
+  .image-preview-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .image-preview-actions strong {
+    flex-basis: 100%;
   }
 
   .message-stack {
@@ -2381,6 +2873,14 @@ function shortId(id) {
 
   .join-code-form {
     grid-template-columns: 1fr;
+  }
+
+  .room-limit-control {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .room-limit-control small {
+    grid-column: 1 / -1;
   }
 
   .home {
