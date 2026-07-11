@@ -183,11 +183,11 @@ func TestWSServerAckAndBroadcast(t *testing.T) {
 	readWSEvent(t, ctx, receiver, "welcome")
 
 	outbound := wsEnvelope{
-		Type:     "group_msg",
-		Room:     "testroom",
-		From:     "client_sender1",
-		Protocol: 3,
-		MsgID:    "msg_1",
+		Type:      "group_msg",
+		Room:      "testroom",
+		From:      "client_sender1",
+		Protocol:  3,
+		MsgID:     "msg_1",
 		Signature: make([]byte, 64),
 	}
 	body, err := msgpack.Marshal(outbound)
@@ -226,12 +226,12 @@ func TestWSPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 	readWSEvent(t, ctx, bystander, "welcome")
 
 	outbound := wsEnvelope{
-		Type:     "private_msg",
-		Room:     "testroom",
-		From:     "client_sender1",
-		To:       "client_receiver",
-		Protocol: 3,
-		MsgID:    "msg_private",
+		Type:      "private_msg",
+		Room:      "testroom",
+		From:      "client_sender1",
+		To:        "client_receiver",
+		Protocol:  3,
+		MsgID:     "msg_private",
 		Signature: make([]byte, 64),
 	}
 	body, err := msgpack.Marshal(outbound)

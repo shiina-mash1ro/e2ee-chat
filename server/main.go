@@ -68,32 +68,32 @@ type Client struct {
 }
 
 type wsEnvelope struct {
-	Type       string `msgpack:"type" json:"type"`
-	Room       string `msgpack:"room" json:"room"`
-	From       string `msgpack:"from" json:"from"`
-	To         string `msgpack:"to,omitempty" json:"to,omitempty"`
-	Protocol   int    `msgpack:"protocol,omitempty" json:"protocol,omitempty"`
-	MsgID      string `msgpack:"msg_id,omitempty" json:"msg_id,omitempty"`
-	AckID      string `msgpack:"ack_id,omitempty" json:"ack_id,omitempty"`
-	TransferID string `msgpack:"transfer_id,omitempty" json:"transfer_id,omitempty"`
-	MessageType string `msgpack:"message_type,omitempty" json:"message_type,omitempty"`
-	Features    []string `msgpack:"features,omitempty" json:"features,omitempty"`
-	Seq        int    `msgpack:"seq,omitempty" json:"seq,omitempty"`
-	Total      int    `msgpack:"total,omitempty" json:"total,omitempty"`
-	Epoch          int    `msgpack:"epoch,omitempty" json:"epoch,omitempty"`
-	NextEpoch      int    `msgpack:"next_epoch,omitempty" json:"next_epoch,omitempty"`
-	SenderKeyID    string `msgpack:"sender_key_id,omitempty" json:"sender_key_id,omitempty"`
-	RecipientKeyID string `msgpack:"recipient_key_id,omitempty" json:"recipient_key_id,omitempty"`
-	RotationID     string `msgpack:"rotation_id,omitempty" json:"rotation_id,omitempty"`
-	PublicKey      []byte `msgpack:"public_key,omitempty" json:"public_key,omitempty"`
-	SignPublicKey  []byte `msgpack:"sign_public_key,omitempty" json:"sign_public_key,omitempty"`
-	HelloMAC       []byte `msgpack:"hello_mac,omitempty" json:"hello_mac,omitempty"`
-	Signature      []byte `msgpack:"signature,omitempty" json:"signature,omitempty"`
-	Nonce          []byte `msgpack:"nonce,omitempty" json:"nonce,omitempty"`
-	Ciphertext     []byte `msgpack:"ciphertext,omitempty" json:"ciphertext,omitempty"`
-	RosterHash     []byte `msgpack:"roster_hash,omitempty" json:"roster_hash,omitempty"`
-	SealedKey      []byte `msgpack:"sealed_key,omitempty" json:"sealed_key,omitempty"`
-	DisplayName    string `msgpack:"display_name,omitempty" json:"display_name,omitempty"`
+	Type           string   `msgpack:"type" json:"type"`
+	Room           string   `msgpack:"room" json:"room"`
+	From           string   `msgpack:"from" json:"from"`
+	To             string   `msgpack:"to,omitempty" json:"to,omitempty"`
+	Protocol       int      `msgpack:"protocol,omitempty" json:"protocol,omitempty"`
+	MsgID          string   `msgpack:"msg_id,omitempty" json:"msg_id,omitempty"`
+	AckID          string   `msgpack:"ack_id,omitempty" json:"ack_id,omitempty"`
+	TransferID     string   `msgpack:"transfer_id,omitempty" json:"transfer_id,omitempty"`
+	MessageType    string   `msgpack:"message_type,omitempty" json:"message_type,omitempty"`
+	Features       []string `msgpack:"features,omitempty" json:"features,omitempty"`
+	Seq            int      `msgpack:"seq,omitempty" json:"seq,omitempty"`
+	Total          int      `msgpack:"total,omitempty" json:"total,omitempty"`
+	Epoch          int      `msgpack:"epoch,omitempty" json:"epoch,omitempty"`
+	NextEpoch      int      `msgpack:"next_epoch,omitempty" json:"next_epoch,omitempty"`
+	SenderKeyID    string   `msgpack:"sender_key_id,omitempty" json:"sender_key_id,omitempty"`
+	RecipientKeyID string   `msgpack:"recipient_key_id,omitempty" json:"recipient_key_id,omitempty"`
+	RotationID     string   `msgpack:"rotation_id,omitempty" json:"rotation_id,omitempty"`
+	PublicKey      []byte   `msgpack:"public_key,omitempty" json:"public_key,omitempty"`
+	SignPublicKey  []byte   `msgpack:"sign_public_key,omitempty" json:"sign_public_key,omitempty"`
+	HelloMAC       []byte   `msgpack:"hello_mac,omitempty" json:"hello_mac,omitempty"`
+	Signature      []byte   `msgpack:"signature,omitempty" json:"signature,omitempty"`
+	Nonce          []byte   `msgpack:"nonce,omitempty" json:"nonce,omitempty"`
+	Ciphertext     []byte   `msgpack:"ciphertext,omitempty" json:"ciphertext,omitempty"`
+	RosterHash     []byte   `msgpack:"roster_hash,omitempty" json:"roster_hash,omitempty"`
+	SealedKey      []byte   `msgpack:"sealed_key,omitempty" json:"sealed_key,omitempty"`
+	DisplayName    string   `msgpack:"display_name,omitempty" json:"display_name,omitempty"`
 }
 
 type RateLimiter struct {
@@ -109,32 +109,32 @@ type rateBucket struct {
 }
 
 type inboundEvent struct {
-	Type           string `json:"type"`
-	Room           string `json:"room"`
-	From           string `json:"from"`
-	To             string `json:"to,omitempty"`
-	Protocol       int    `json:"protocol"`
-	MsgID          string `json:"msg_id,omitempty"`
-	AckID          string `json:"ack_id,omitempty"`
-	TransferID     string `json:"transfer_id,omitempty"`
-	MessageType    string `json:"message_type,omitempty"`
+	Type           string   `json:"type"`
+	Room           string   `json:"room"`
+	From           string   `json:"from"`
+	To             string   `json:"to,omitempty"`
+	Protocol       int      `json:"protocol"`
+	MsgID          string   `json:"msg_id,omitempty"`
+	AckID          string   `json:"ack_id,omitempty"`
+	TransferID     string   `json:"transfer_id,omitempty"`
+	MessageType    string   `json:"message_type,omitempty"`
 	Features       []string `json:"features,omitempty"`
-	Seq            int    `json:"seq,omitempty"`
-	Total          int    `json:"total,omitempty"`
-	Epoch          int    `json:"epoch,omitempty"`
-	NextEpoch      int    `json:"next_epoch,omitempty"`
-	SenderKeyID    string `json:"sender_key_id,omitempty"`
-	RecipientKeyID string `json:"recipient_key_id,omitempty"`
-	RotationID     string `json:"rotation_id,omitempty"`
-	PublicKey      string `json:"public_key,omitempty"`
-	SignPublicKey  string `json:"sign_public_key,omitempty"`
-	HelloMAC       string `json:"hello_mac,omitempty"`
-	Signature      string `json:"signature,omitempty"`
-	Nonce          string `json:"nonce,omitempty"`
-	Ciphertext     string `json:"ciphertext,omitempty"`
-	RosterHash     string `json:"roster_hash,omitempty"`
-	SealedKey      string `json:"sealed_key,omitempty"`
-	DisplayName    string `json:"display_name,omitempty"`
+	Seq            int      `json:"seq,omitempty"`
+	Total          int      `json:"total,omitempty"`
+	Epoch          int      `json:"epoch,omitempty"`
+	NextEpoch      int      `json:"next_epoch,omitempty"`
+	SenderKeyID    string   `json:"sender_key_id,omitempty"`
+	RecipientKeyID string   `json:"recipient_key_id,omitempty"`
+	RotationID     string   `json:"rotation_id,omitempty"`
+	PublicKey      string   `json:"public_key,omitempty"`
+	SignPublicKey  string   `json:"sign_public_key,omitempty"`
+	HelloMAC       string   `json:"hello_mac,omitempty"`
+	Signature      string   `json:"signature,omitempty"`
+	Nonce          string   `json:"nonce,omitempty"`
+	Ciphertext     string   `json:"ciphertext,omitempty"`
+	RosterHash     string   `json:"roster_hash,omitempty"`
+	SealedKey      string   `json:"sealed_key,omitempty"`
+	DisplayName    string   `json:"display_name,omitempty"`
 }
 
 type codeRoomResponse struct {
@@ -502,28 +502,73 @@ func (h *Hub) dispatchWS(roomID string, event wsEnvelope, msg []byte) {
 
 func (e inboundEvent) toWS() (wsEnvelope, error) {
 	decode := func(value string) ([]byte, error) {
-		if value == "" { return nil, nil }
+		if value == "" {
+			return nil, nil
+		}
 		return base64.StdEncoding.DecodeString(value)
 	}
-	publicKey, err := decode(e.PublicKey); if err != nil { return wsEnvelope{}, err }
-	signPublicKey, err := decode(e.SignPublicKey); if err != nil { return wsEnvelope{}, err }
-	helloMAC, err := decode(e.HelloMAC); if err != nil { return wsEnvelope{}, err }
-	signature, err := decode(e.Signature); if err != nil { return wsEnvelope{}, err }
-	nonce, err := decode(e.Nonce); if err != nil { return wsEnvelope{}, err }
-	ciphertext, err := decode(e.Ciphertext); if err != nil { return wsEnvelope{}, err }
-	rosterHash, err := decode(e.RosterHash); if err != nil { return wsEnvelope{}, err }
-	sealedKey, err := decode(e.SealedKey); if err != nil { return wsEnvelope{}, err }
-	return wsEnvelope{Type:e.Type, Room:e.Room, From:e.From, To:e.To, Protocol:e.Protocol, MsgID:e.MsgID, AckID:e.AckID, TransferID:e.TransferID, MessageType:e.MessageType, Features:e.Features, Seq:e.Seq, Total:e.Total, Epoch:e.Epoch, NextEpoch:e.NextEpoch, SenderKeyID:e.SenderKeyID, RecipientKeyID:e.RecipientKeyID, RotationID:e.RotationID, PublicKey:publicKey, SignPublicKey:signPublicKey, HelloMAC:helloMAC, Signature:signature, Nonce:nonce, Ciphertext:ciphertext, RosterHash:rosterHash, SealedKey:sealedKey, DisplayName:e.DisplayName}, nil
+	publicKey, err := decode(e.PublicKey)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	signPublicKey, err := decode(e.SignPublicKey)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	helloMAC, err := decode(e.HelloMAC)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	signature, err := decode(e.Signature)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	nonce, err := decode(e.Nonce)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	ciphertext, err := decode(e.Ciphertext)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	rosterHash, err := decode(e.RosterHash)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	sealedKey, err := decode(e.SealedKey)
+	if err != nil {
+		return wsEnvelope{}, err
+	}
+	return wsEnvelope{Type: e.Type, Room: e.Room, From: e.From, To: e.To, Protocol: e.Protocol, MsgID: e.MsgID, AckID: e.AckID, TransferID: e.TransferID, MessageType: e.MessageType, Features: e.Features, Seq: e.Seq, Total: e.Total, Epoch: e.Epoch, NextEpoch: e.NextEpoch, SenderKeyID: e.SenderKeyID, RecipientKeyID: e.RecipientKeyID, RotationID: e.RotationID, PublicKey: publicKey, SignPublicKey: signPublicKey, HelloMAC: helloMAC, Signature: signature, Nonce: nonce, Ciphertext: ciphertext, RosterHash: rosterHash, SealedKey: sealedKey, DisplayName: e.DisplayName}, nil
 }
 
 func (e wsEnvelope) toSSE() map[string]any {
-	result := map[string]any{"type":e.Type, "room":e.Room, "from":e.From, "protocol":e.Protocol}
-	put := func(key string, value any, present bool) { if present { result[key] = value } }
-	put("to", e.To, e.To != ""); put("msg_id", e.MsgID, e.MsgID != ""); put("ack_id", e.AckID, e.AckID != ""); put("transfer_id", e.TransferID, e.TransferID != ""); put("message_type", e.MessageType, e.MessageType != "")
-	put("features", e.Features, len(e.Features)>0); put("seq", e.Seq, e.Seq != 0); put("total", e.Total, e.Total != 0); put("epoch", e.Epoch, true); put("next_epoch", e.NextEpoch, e.NextEpoch != 0)
-	put("sender_key_id", e.SenderKeyID, e.SenderKeyID != ""); put("recipient_key_id", e.RecipientKeyID, e.RecipientKeyID != ""); put("rotation_id", e.RotationID, e.RotationID != ""); put("display_name", e.DisplayName, e.DisplayName != "")
-	binary := map[string][]byte{"public_key":e.PublicKey, "sign_public_key":e.SignPublicKey, "hello_mac":e.HelloMAC, "signature":e.Signature, "nonce":e.Nonce, "ciphertext":e.Ciphertext, "roster_hash":e.RosterHash, "sealed_key":e.SealedKey}
-	for key, value := range binary { if len(value)>0 { result[key] = base64.StdEncoding.EncodeToString(value) } }
+	result := map[string]any{"type": e.Type, "room": e.Room, "from": e.From, "protocol": e.Protocol}
+	put := func(key string, value any, present bool) {
+		if present {
+			result[key] = value
+		}
+	}
+	put("to", e.To, e.To != "")
+	put("msg_id", e.MsgID, e.MsgID != "")
+	put("ack_id", e.AckID, e.AckID != "")
+	put("transfer_id", e.TransferID, e.TransferID != "")
+	put("message_type", e.MessageType, e.MessageType != "")
+	put("features", e.Features, len(e.Features) > 0)
+	put("seq", e.Seq, e.Seq != 0)
+	put("total", e.Total, e.Total != 0)
+	put("epoch", e.Epoch, true)
+	put("next_epoch", e.NextEpoch, e.NextEpoch != 0)
+	put("sender_key_id", e.SenderKeyID, e.SenderKeyID != "")
+	put("recipient_key_id", e.RecipientKeyID, e.RecipientKeyID != "")
+	put("rotation_id", e.RotationID, e.RotationID != "")
+	put("display_name", e.DisplayName, e.DisplayName != "")
+	binary := map[string][]byte{"public_key": e.PublicKey, "sign_public_key": e.SignPublicKey, "hello_mac": e.HelloMAC, "signature": e.Signature, "nonce": e.Nonce, "ciphertext": e.Ciphertext, "roster_hash": e.RosterHash, "sealed_key": e.SealedKey}
+	for key, value := range binary {
+		if len(value) > 0 {
+			result[key] = base64.StdEncoding.EncodeToString(value)
+		}
+	}
 	return result
 }
 
@@ -615,7 +660,7 @@ func main() {
 
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
