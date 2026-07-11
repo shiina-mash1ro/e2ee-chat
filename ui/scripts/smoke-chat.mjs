@@ -282,7 +282,6 @@ async function assertChatWorks(pageA, pageB, pageC) {
   }
 
   await pageA.getByRole("button", { name: "一键鸵鸟" }).click();
-  await pageA.getByRole("button", { name: "确认", exact: true }).click();
   await pageB.getByText("hello from A group").waitFor({ state: "detached", timeout: 10000 });
   await pageC.getByText("hello from A group").waitFor({ state: "detached", timeout: 10000 });
   await pageB.getByText("hello from B group").waitFor({ timeout: 10000 });

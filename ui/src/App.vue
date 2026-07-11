@@ -92,7 +92,14 @@
               </div>
             </header>
 
-            <n-alert v-if="notice" class="notice" type="error" :bordered="false">
+            <n-alert
+              v-if="notice"
+              class="notice"
+              type="error"
+              :bordered="false"
+              closable
+              @close="notice = ''"
+            >
               {{ notice }}
             </n-alert>
 
@@ -237,6 +244,14 @@
                   </div>
                 </n-scrollbar>
 
+                <section v-if="emojiPanelVisible" id="emoji-panel" ref="emojiPanelRef" class="emoji-panel" aria-label="Emoji 选择器">
+                  <div class="emoji-grid">
+                    <button v-for="emoji in emojiList" :key="emoji" type="button" @click="insertEmoji(emoji)">
+                      {{ emoji }}
+                    </button>
+                  </div>
+                </section>
+
                 <div v-if="selectedFile" class="selected-file">
                   <img
                     v-if="selectedFileUrl && isImageLike(selectedFile.type)"
@@ -268,16 +283,38 @@
                   </div>
                   <div class="composer-tools">
                     <n-button attr-type="button" :disabled="!canSend" aria-label="选择图片或文件" @click="chooseFile">📎</n-button>
-                    <n-popover trigger="click" placement="top-start">
-                      <template #trigger>
-                        <n-button attr-type="button" :disabled="!canSend" aria-label="插入 emoji">😀</n-button>
-                      </template>
-                      <div class="emoji-grid">
-                        <button v-for="emoji in emojiList" :key="emoji" type="button" @click="insertEmoji(emoji)">
-                          {{ emoji }}
-                        </button>
-                      </div>
-                    </n-popover>
+                    <div class="emoji-desktop">
+                      <n-popover trigger="click" placement="top-start">
+                        <template #trigger>
+                          <n-button attr-type="button" :disabled="!canSend" aria-label="插入 emoji">😀</n-button>
+                        </template>
+                        <div
+                          class="emoji-grid emoji-grid-popover"
+                          :style="{
+                            gridTemplateColumns: 'repeat(8, 34px)',
+                            gap: '5px',
+                            width: '330px',
+                            maxWidth: 'calc(100vw - 48px)',
+                            maxHeight: '320px',
+                          }"
+                        >
+                          <button v-for="emoji in emojiList" :key="emoji" type="button" @click="insertEmoji(emoji)">
+                            {{ emoji }}
+                          </button>
+                        </div>
+                      </n-popover>
+                    </div>
+                    <div ref="emojiToggleRef" class="emoji-mobile">
+                      <n-button
+                        attr-type="button"
+                        :type="emojiPanelVisible ? 'primary' : 'default'"
+                        :disabled="!canSend"
+                        :aria-expanded="emojiPanelVisible"
+                        aria-controls="emoji-panel"
+                        aria-label="插入 emoji"
+                        @click="emojiPanelVisible = !emojiPanelVisible"
+                      >😀</n-button>
+                    </div>
                     <n-button
                       attr-type="button"
                       :type="codeMode ? 'primary' : 'default'"
@@ -286,12 +323,12 @@
                       aria-label="切换代码模式"
                       @click="codeMode = !codeMode"
                     >&lt;/&gt;</n-button>
-                    <n-popconfirm positive-text="确认" negative-text="取消" @positive-click="purgeOwnMessages">
-                      <template #trigger>
-                        <n-button attr-type="button" :loading="roomActionBusy" aria-label="一键鸵鸟">🦤</n-button>
-                      </template>
-                      删除你在所有在线成员聊天区中的消息，但继续留在房间？
-                    </n-popconfirm>
+                    <n-button
+                      attr-type="button"
+                      :loading="roomActionBusy"
+                      aria-label="一键鸵鸟"
+                      @click="purgeOwnMessages"
+                    >🦤</n-button>
                   </div>
                 </n-form>
               </section>
@@ -420,6 +457,9 @@ const imagePreviewScale = ref(1);
 const imagePreviewOffsetX = ref(0);
 const imagePreviewOffsetY = ref(0);
 const imagePreviewDragging = ref(false);
+const emojiPanelVisible = ref(false);
+const emojiPanelRef = ref(null);
+const emojiToggleRef = ref(null);
 let messageSeq = 0;
 let notificationSeq = 0;
 let sessionEpoch = 0;
@@ -487,10 +527,24 @@ const darkUserPalette = [
   { color: "#f7b981", background: "#352313", border: "#aa6a2a" },
 ];
 const emojiList = [
-  "😀", "😄", "😂", "🤣", "😊", "😍", "😘", "😎", "🤔", "😭", "😅", "😡",
-  "👍", "👎", "🙏", "👏", "🙌", "🤝", "👀", "💪", "👌", "✌️", "🤞", "🫡",
-  "❤️", "🧡", "💛", "💚", "💙", "💜", "✨", "⭐", "🔥", "🎉", "✅", "❌",
-  "💡", "📌", "📎", "📷", "🖼️", "📄", "🔒", "🔑", "🚀", "☕", "🍻", "❓",
+  "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇", "🙂", "🙃",
+  "😉", "😌", "😍", "🥰", "😘", "😗", "😋", "😛", "😜", "🤪", "🤨", "🧐",
+  "🤓", "😎", "🥳", "😏", "😒", "😞", "😔", "😟", "😕", "🙁", "☹️", "😣",
+  "😖", "😫", "😩", "🥺", "😢", "😭", "😤", "😠", "😡", "🤬", "🤯", "😳",
+  "🥵", "🥶", "😱", "😨", "😰", "😥", "🤔", "🫣", "🤭", "🫢", "🤫", "🫡",
+  "😶", "😐", "😑", "😬", "🙄", "😴", "🤤", "😪", "😵", "🤐", "🤢", "🤮",
+  "👍", "👎", "👌", "🤌", "✌️", "🤞", "🫰", "🤟", "🤘", "🤙", "👈", "👉",
+  "👆", "👇", "☝️", "✋", "🤚", "🖐️", "🖖", "👋", "🤝", "👏", "🙌", "🫶",
+  "🙏", "✍️", "💪", "🦾", "👀", "👁️", "🧠", "🫂", "👤", "👥", "💬", "💭",
+  "❤️", "🩷", "🧡", "💛", "💚", "🩵", "💙", "💜", "🤎", "🖤", "🩶", "🤍",
+  "💔", "❤️‍🔥", "❤️‍🩹", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "❣️",
+  "✨", "⭐", "🌟", "💫", "🔥", "💥", "🎉", "🎊", "✅", "❌", "❓", "❗",
+  "💡", "📌", "📎", "✏️", "📝", "📄", "📷", "🖼️", "🔒", "🔓", "🔑", "🛠️",
+  "🚀", "✈️", "🚗", "🚲", "🏠", "🏢", "⏰", "📅", "⌛", "🔔", "🎁", "🏆",
+  "☀️", "🌙", "☁️", "🌧️", "❄️", "🌈", "🌸", "🌹", "🍀", "🌱", "🌍", "🌊",
+  "🍎", "🍊", "🍉", "🍇", "🍓", "🍒", "🍔", "🍕", "🍜", "🍰", "☕", "🧋",
+  "🍺", "🍻", "🥂", "⚽", "🏀", "🎮", "🎵", "🎧", "📱", "💻", "⌨️", "🦤",
+  "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐸",
 ];
 
 const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && transport.value));
@@ -529,10 +583,12 @@ onBeforeUnmount(() => {
   if (rotationTimer) clearInterval(rotationTimer);
   window.removeEventListener("online", wakeWSRecovery);
   document.removeEventListener("visibilitychange", handleVisibilityRecovery);
+  document.removeEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 });
 
 window.addEventListener("online", wakeWSRecovery);
 document.addEventListener("visibilitychange", handleVisibilityRecovery);
+document.addEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 
 function boot() {
   const parsedRoomId = parseRoomId(location.pathname);
@@ -1900,6 +1956,13 @@ function insertEmoji(emoji) {
   draft.value = `${draft.value}${emoji}`;
 }
 
+function closeEmojiPanelOnOutsideClick(event) {
+  if (!emojiPanelVisible.value) return;
+  const target = event.target;
+  if (emojiPanelRef.value?.contains(target) || emojiToggleRef.value?.contains(target)) return;
+  emojiPanelVisible.value = false;
+}
+
 function chooseFile() {
   fileInputRef.value?.click();
 }
@@ -2629,7 +2692,8 @@ function shortId(id) {
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  grid-auto-rows: auto;
   overflow: hidden;
 }
 
@@ -2944,18 +3008,55 @@ function shortId(id) {
   display: none;
 }
 
-.emoji-grid {
-  display: grid;
+.emoji-panel {
+  min-width: 0;
+  max-height: min(380px, 46dvh);
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 -10px 28px rgb(15 23 42 / 10%);
+}
+
+.emoji-mobile {
+  display: none;
+}
+
+.emoji-grid-popover {
   grid-template-columns: repeat(8, 34px);
   gap: 5px;
-  max-width: 307px;
-  max-height: 236px;
+  width: 330px;
+  max-width: calc(100vw - 48px);
+  max-height: 320px;
+}
+
+.emoji-grid-popover button {
+  width: 34px;
+  height: 34px;
+  aspect-ratio: auto;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(38px, 44px));
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  max-height: min(320px, 38dvh);
+  padding: 2px 4px 2px 2px;
+  overflow-x: hidden;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  -webkit-overflow-scrolling: touch;
 }
 
 .emoji-grid button {
-  width: 34px;
-  height: 34px;
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 1;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface);
@@ -2977,6 +3078,30 @@ function shortId(id) {
   :deep(textarea),
   :deep(select) {
     font-size: 16px !important;
+  }
+
+  .emoji-grid {
+    grid-template-columns: repeat(7, minmax(34px, 1fr));
+    max-height: min(280px, 34dvh);
+  }
+
+  .emoji-panel {
+    display: flex;
+    max-height: min(340px, 42dvh);
+    padding: 8px 10px 10px;
+  }
+
+  .emoji-desktop {
+    display: none;
+  }
+
+  .emoji-mobile {
+    display: block;
+    width: 100%;
+  }
+
+  .emoji-mobile > .n-button {
+    width: 100%;
   }
 
   .content {
