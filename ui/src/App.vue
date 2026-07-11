@@ -2970,6 +2970,15 @@ function shortId(id) {
 }
 
 @media (max-width: 640px) {
+  /* iOS Safari zooms the viewport when a focused form control renders below 16px. */
+  :deep(.n-input__input-el),
+  :deep(.n-input__textarea-el),
+  :deep(input:not([type="checkbox"]):not([type="radio"])),
+  :deep(textarea),
+  :deep(select) {
+    font-size: 16px !important;
+  }
+
   .content {
     width: 100%;
     height: 100vh;
