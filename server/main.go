@@ -76,8 +76,24 @@ type wsEnvelope struct {
 	MsgID      string `msgpack:"msg_id,omitempty" json:"msg_id,omitempty"`
 	AckID      string `msgpack:"ack_id,omitempty" json:"ack_id,omitempty"`
 	TransferID string `msgpack:"transfer_id,omitempty" json:"transfer_id,omitempty"`
+	MessageType string `msgpack:"message_type,omitempty" json:"message_type,omitempty"`
+	Features    []string `msgpack:"features,omitempty" json:"features,omitempty"`
 	Seq        int    `msgpack:"seq,omitempty" json:"seq,omitempty"`
 	Total      int    `msgpack:"total,omitempty" json:"total,omitempty"`
+	Epoch          int    `msgpack:"epoch,omitempty" json:"epoch,omitempty"`
+	NextEpoch      int    `msgpack:"next_epoch,omitempty" json:"next_epoch,omitempty"`
+	SenderKeyID    string `msgpack:"sender_key_id,omitempty" json:"sender_key_id,omitempty"`
+	RecipientKeyID string `msgpack:"recipient_key_id,omitempty" json:"recipient_key_id,omitempty"`
+	RotationID     string `msgpack:"rotation_id,omitempty" json:"rotation_id,omitempty"`
+	PublicKey      []byte `msgpack:"public_key,omitempty" json:"public_key,omitempty"`
+	SignPublicKey  []byte `msgpack:"sign_public_key,omitempty" json:"sign_public_key,omitempty"`
+	HelloMAC       []byte `msgpack:"hello_mac,omitempty" json:"hello_mac,omitempty"`
+	Signature      []byte `msgpack:"signature,omitempty" json:"signature,omitempty"`
+	Nonce          []byte `msgpack:"nonce,omitempty" json:"nonce,omitempty"`
+	Ciphertext     []byte `msgpack:"ciphertext,omitempty" json:"ciphertext,omitempty"`
+	RosterHash     []byte `msgpack:"roster_hash,omitempty" json:"roster_hash,omitempty"`
+	SealedKey      []byte `msgpack:"sealed_key,omitempty" json:"sealed_key,omitempty"`
+	DisplayName    string `msgpack:"display_name,omitempty" json:"display_name,omitempty"`
 }
 
 type RateLimiter struct {
@@ -93,10 +109,32 @@ type rateBucket struct {
 }
 
 type inboundEvent struct {
-	Type string `json:"type"`
-	Room string `json:"room"`
-	From string `json:"from"`
-	To   string `json:"to,omitempty"`
+	Type           string `json:"type"`
+	Room           string `json:"room"`
+	From           string `json:"from"`
+	To             string `json:"to,omitempty"`
+	Protocol       int    `json:"protocol"`
+	MsgID          string `json:"msg_id,omitempty"`
+	AckID          string `json:"ack_id,omitempty"`
+	TransferID     string `json:"transfer_id,omitempty"`
+	MessageType    string `json:"message_type,omitempty"`
+	Features       []string `json:"features,omitempty"`
+	Seq            int    `json:"seq,omitempty"`
+	Total          int    `json:"total,omitempty"`
+	Epoch          int    `json:"epoch,omitempty"`
+	NextEpoch      int    `json:"next_epoch,omitempty"`
+	SenderKeyID    string `json:"sender_key_id,omitempty"`
+	RecipientKeyID string `json:"recipient_key_id,omitempty"`
+	RotationID     string `json:"rotation_id,omitempty"`
+	PublicKey      string `json:"public_key,omitempty"`
+	SignPublicKey  string `json:"sign_public_key,omitempty"`
+	HelloMAC       string `json:"hello_mac,omitempty"`
+	Signature      string `json:"signature,omitempty"`
+	Nonce          string `json:"nonce,omitempty"`
+	Ciphertext     string `json:"ciphertext,omitempty"`
+	RosterHash     string `json:"roster_hash,omitempty"`
+	SealedKey      string `json:"sealed_key,omitempty"`
+	DisplayName    string `json:"display_name,omitempty"`
 }
 
 type codeRoomResponse struct {
@@ -364,9 +402,9 @@ func (h *Hub) schedulePurgeLocked(roomID string, room *Room, clientID string) {
 }
 
 func (h *Hub) broadcastPeerPurgeLocked(roomID string, room *Room, clientID string) {
-	jsonBody := []byte(fmt.Sprintf(`{"type":"peer_purge","room":%q,"from":%q}`, roomID, clientID))
+	jsonBody := []byte(fmt.Sprintf(`{"type":"peer_purge","room":%q,"from":%q,"protocol":3}`, roomID, clientID))
 	h.broadcastToSSELocked(room, nil, jsonBody)
-	wsBody, err := msgpack.Marshal(wsEnvelope{Type: "peer_purge", Room: roomID, From: clientID, Protocol: 2})
+	wsBody, err := msgpack.Marshal(wsEnvelope{Type: "peer_purge", Room: roomID, From: clientID, Protocol: 3})
 	if err == nil {
 		h.broadcastToWSLocked(room, nil, wsBody)
 	}
@@ -397,9 +435,9 @@ func (h *Hub) explicitAction(roomID, clientID, token string, wsClient *Client, l
 			delete(room.wsClients, clientID)
 		}
 		close(client.events)
-		jsonLeave := []byte(fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q}`, roomID, clientID))
+		jsonLeave := []byte(fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q,"protocol":3}`, roomID, clientID))
 		h.broadcastToSSELocked(room, nil, jsonLeave)
-		wsLeave, err := msgpack.Marshal(wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 2})
+		wsLeave, err := msgpack.Marshal(wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 3})
 		if err == nil {
 			h.broadcastToWSLocked(room, nil, wsLeave)
 		}
@@ -435,6 +473,11 @@ func (h *Hub) dispatchSSE(roomID string, event inboundEvent, msg []byte) {
 	room := h.roomLocked(roomID)
 	targets := eventTargets(event.Type, event.From, event.To)
 	h.broadcastToSSELocked(room, targets, msg)
+	if wsEvent, err := event.toWS(); err == nil {
+		if wsBody, err := msgpack.Marshal(wsEvent); err == nil {
+			h.broadcastToWSLocked(room, targets, wsBody)
+		}
+	}
 	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
 		delete(h.rooms, roomID)
 	}
@@ -447,9 +490,41 @@ func (h *Hub) dispatchWS(roomID string, event wsEnvelope, msg []byte) {
 	room := h.roomLocked(roomID)
 	targets := eventTargets(event.Type, event.From, event.To)
 	h.broadcastToWSLocked(room, targets, msg)
+	if sseEvent := event.toSSE(); sseEvent != nil {
+		if sseBody, err := json.Marshal(sseEvent); err == nil {
+			h.broadcastToSSELocked(room, targets, sseBody)
+		}
+	}
 	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
 		delete(h.rooms, roomID)
 	}
+}
+
+func (e inboundEvent) toWS() (wsEnvelope, error) {
+	decode := func(value string) ([]byte, error) {
+		if value == "" { return nil, nil }
+		return base64.StdEncoding.DecodeString(value)
+	}
+	publicKey, err := decode(e.PublicKey); if err != nil { return wsEnvelope{}, err }
+	signPublicKey, err := decode(e.SignPublicKey); if err != nil { return wsEnvelope{}, err }
+	helloMAC, err := decode(e.HelloMAC); if err != nil { return wsEnvelope{}, err }
+	signature, err := decode(e.Signature); if err != nil { return wsEnvelope{}, err }
+	nonce, err := decode(e.Nonce); if err != nil { return wsEnvelope{}, err }
+	ciphertext, err := decode(e.Ciphertext); if err != nil { return wsEnvelope{}, err }
+	rosterHash, err := decode(e.RosterHash); if err != nil { return wsEnvelope{}, err }
+	sealedKey, err := decode(e.SealedKey); if err != nil { return wsEnvelope{}, err }
+	return wsEnvelope{Type:e.Type, Room:e.Room, From:e.From, To:e.To, Protocol:e.Protocol, MsgID:e.MsgID, AckID:e.AckID, TransferID:e.TransferID, MessageType:e.MessageType, Features:e.Features, Seq:e.Seq, Total:e.Total, Epoch:e.Epoch, NextEpoch:e.NextEpoch, SenderKeyID:e.SenderKeyID, RecipientKeyID:e.RecipientKeyID, RotationID:e.RotationID, PublicKey:publicKey, SignPublicKey:signPublicKey, HelloMAC:helloMAC, Signature:signature, Nonce:nonce, Ciphertext:ciphertext, RosterHash:rosterHash, SealedKey:sealedKey, DisplayName:e.DisplayName}, nil
+}
+
+func (e wsEnvelope) toSSE() map[string]any {
+	result := map[string]any{"type":e.Type, "room":e.Room, "from":e.From, "protocol":e.Protocol}
+	put := func(key string, value any, present bool) { if present { result[key] = value } }
+	put("to", e.To, e.To != ""); put("msg_id", e.MsgID, e.MsgID != ""); put("ack_id", e.AckID, e.AckID != ""); put("transfer_id", e.TransferID, e.TransferID != ""); put("message_type", e.MessageType, e.MessageType != "")
+	put("features", e.Features, len(e.Features)>0); put("seq", e.Seq, e.Seq != 0); put("total", e.Total, e.Total != 0); put("epoch", e.Epoch, true); put("next_epoch", e.NextEpoch, e.NextEpoch != 0)
+	put("sender_key_id", e.SenderKeyID, e.SenderKeyID != ""); put("recipient_key_id", e.RecipientKeyID, e.RecipientKeyID != ""); put("rotation_id", e.RotationID, e.RotationID != ""); put("display_name", e.DisplayName, e.DisplayName != "")
+	binary := map[string][]byte{"public_key":e.PublicKey, "sign_public_key":e.SignPublicKey, "hello_mac":e.HelloMAC, "signature":e.Signature, "nonce":e.Nonce, "ciphertext":e.Ciphertext, "roster_hash":e.RosterHash, "sealed_key":e.SealedKey}
+	for key, value := range binary { if len(value)>0 { result[key] = base64.StdEncoding.EncodeToString(value) } }
+	return result
 }
 
 func (h *Hub) broadcastToSSELocked(room *Room, targets map[string]struct{}, msg []byte) {
@@ -489,7 +564,9 @@ func (h *Hub) broadcastToWSLocked(room *Room, targets map[string]struct{}, msg [
 }
 
 func eventTargets(eventType, from, to string) map[string]struct{} {
-	if eventType != "private_msg" && eventType != "recipient_ack" && eventType != "chunk" {
+	switch eventType {
+	case "private_msg", "recipient_ack", "chunk", "key_offer", "key_ready", "join_key_offer", "join_key_ready", "device_key_update":
+	default:
 		return nil
 	}
 	if to == "" {
@@ -526,7 +603,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -534,6 +611,19 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src 'self'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func pageHandler(w http.ResponseWriter, r *http.Request) {
@@ -731,7 +821,7 @@ func (h *Hub) eventsHandler(w http.ResponseWriter, r *http.Request, roomID strin
 	defer func() {
 		removed := h.removeClient(roomID, client)
 		if removed && !h.clientOnline(roomID, clientID) {
-			leave := fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q}`, roomID, clientID)
+			leave := fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q,"protocol":3}`, roomID, clientID)
 			h.broadcast(roomID, []byte(leave))
 		}
 	}()
@@ -800,6 +890,10 @@ func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID str
 		http.Error(w, "invalid recipient", http.StatusBadRequest)
 		return
 	}
+	if err := validateSSEEvent(event); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if event.Type == "purge_self" || event.Type == "leave_room" {
 		connectionToken := r.Header.Get("X-Connection-Token")
 		if event.From == "" || !h.explicitAction(roomID, event.From, connectionToken, nil, event.Type == "leave_room") {
@@ -844,14 +938,14 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 	defer func() {
 		removed := h.removeWSClient(roomID, client)
 		if removed && !h.clientOnline(roomID, clientID) {
-			leave := wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 2}
+			leave := wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 3}
 			if body, err := msgpack.Marshal(leave); err == nil {
 				h.broadcastWS(roomID, body)
 			}
 		}
 	}()
 
-	welcome := wsEnvelope{Type: "welcome", Room: roomID, From: "server", Protocol: 2}
+	welcome := wsEnvelope{Type: "welcome", Room: roomID, From: "server", Protocol: 3}
 	if body, err := msgpack.Marshal(welcome); err == nil {
 		client.events <- body
 	}
@@ -874,7 +968,7 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 				return
 			}
 		case <-ticker.C:
-			ping := wsEnvelope{Type: "ping", Room: roomID, From: "server", Protocol: 2}
+			ping := wsEnvelope{Type: "ping", Room: roomID, From: "server", Protocol: 3}
 			body, err := msgpack.Marshal(ping)
 			if err != nil {
 				continue
@@ -900,16 +994,16 @@ func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *webso
 
 		var event wsEnvelope
 		if err := msgpack.Unmarshal(body, &event); err != nil {
-			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2})
+			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 3})
 			continue
 		}
 		if err := validateWSEvent(event, roomID, client.id); err != nil {
-			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2, AckID: event.MsgID})
+			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 3, AckID: event.MsgID})
 			continue
 		}
 		if event.Type == "purge_self" || event.Type == "leave_room" {
 			if !h.explicitAction(roomID, client.id, "", client, event.Type == "leave_room") {
-				enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 2})
+				enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 3})
 			}
 			if event.Type == "leave_room" {
 				return
@@ -922,7 +1016,7 @@ func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *webso
 			ackType = "chunk_ack"
 		}
 		if event.MsgID != "" {
-			enqueueWS(client, wsEnvelope{Type: ackType, Room: roomID, From: "server", Protocol: 2, AckID: event.MsgID})
+			enqueueWS(client, wsEnvelope{Type: ackType, Room: roomID, From: "server", Protocol: 3, AckID: event.MsgID})
 		}
 		h.dispatchWS(roomID, event, body)
 		log.Printf("ws dispatch room=%s type=%s", roomID, event.Type)
@@ -941,7 +1035,7 @@ func enqueueWS(client *Client, event wsEnvelope) {
 }
 
 func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
-	if event.Protocol != 2 {
+	if event.Protocol != 3 {
 		return errors.New("invalid protocol")
 	}
 	if !validWSEventType(event.Type) {
@@ -962,12 +1056,76 @@ func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
 	if requiresMsgID(event.Type) && event.MsgID == "" {
 		return errors.New("missing message id")
 	}
+	if len(event.MsgID) > 160 || len(event.AckID) > 160 || len(event.TransferID) > 160 || len(event.RotationID) > 160 || len(event.SenderKeyID) > 96 || len(event.RecipientKeyID) > 96 {
+		return errors.New("event identifier too long")
+	}
+	if event.Type == "hello" || event.Type == "peer_hello" {
+		if len(event.PublicKey) != 32 || len(event.SignPublicKey) != 32 || len(event.HelloMAC) != 32 || len(event.Signature) != 64 || event.SenderKeyID == "" {
+			return errors.New("invalid authenticated hello")
+		}
+	} else if requiresSignature(event.Type) && len(event.Signature) != 64 {
+		return errors.New("missing or invalid signature")
+	}
+	if len(event.Nonce) > 32 || len(event.RosterHash) > 64 || len(event.SealedKey) > 256 {
+		return errors.New("binary field too large")
+	}
+	if len(event.PublicKey) > 32 || len(event.SignPublicKey) > 32 || len(event.HelloMAC) > 32 || len(event.Signature) > 64 || len(event.Ciphertext) > maxBodyBytes {
+		return errors.New("binary field too large")
+	}
+	if event.Type == "chunk" && (event.Total <= 0 || event.Total > 4096 || event.Seq < 0 || event.Seq >= event.Total) {
+		return errors.New("invalid chunk range")
+	}
 	return nil
+}
+
+func validateSSEEvent(event inboundEvent) error {
+	if event.Protocol != 3 {
+		return errors.New("invalid protocol")
+	}
+	if !validEventType(event.Type) {
+		return errors.New("invalid event type")
+	}
+	if requiresMsgID(event.Type) && event.MsgID == "" {
+		return errors.New("missing message id")
+	}
+	if len(event.MsgID) > 160 || len(event.AckID) > 160 || len(event.TransferID) > 160 || len(event.RotationID) > 160 || len(event.SenderKeyID) > 96 || len(event.RecipientKeyID) > 96 {
+		return errors.New("event identifier too long")
+	}
+	if event.Type == "hello" || event.Type == "peer_hello" {
+		if !validBase64Bytes(event.PublicKey, 32) || !validBase64Bytes(event.SignPublicKey, 32) || !validBase64Bytes(event.HelloMAC, 32) || !validBase64Bytes(event.Signature, 64) || event.SenderKeyID == "" {
+			return errors.New("invalid authenticated hello")
+		}
+	} else if requiresSignature(event.Type) && !validBase64Bytes(event.Signature, 64) {
+		return errors.New("missing or invalid signature")
+	}
+	if !validOptionalBase64(event.Nonce, 32) || !validOptionalBase64(event.RosterHash, 64) || !validOptionalBase64(event.SealedKey, 256) {
+		return errors.New("invalid binary field")
+	}
+	if !validOptionalBase64(event.Ciphertext, maxBodyBytes) {
+		return errors.New("invalid ciphertext")
+	}
+	if event.Type == "chunk" && (event.Total <= 0 || event.Total > 4096 || event.Seq < 0 || event.Seq >= event.Total) {
+		return errors.New("invalid chunk range")
+	}
+	return nil
+}
+
+func validBase64Bytes(value string, size int) bool {
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	return err == nil && len(decoded) == size
+}
+
+func validOptionalBase64(value string, maxSize int) bool {
+	if value == "" {
+		return true
+	}
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	return err == nil && len(decoded) <= maxSize
 }
 
 func validEventType(t string) bool {
 	switch t {
-	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "purge_self", "leave_room":
+	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "purge_self", "leave_room", "key_prepare", "key_offer", "key_ready", "key_commit", "key_abort", "join_key_offer", "join_key_ready", "device_key_update":
 		return true
 	default:
 		return false
@@ -976,7 +1134,16 @@ func validEventType(t string) bool {
 
 func validWSEventType(t string) bool {
 	switch t {
-	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "chunk", "purge_self", "leave_room":
+	case "hello", "peer_hello", "group_msg", "private_msg", "recipient_ack", "chunk", "purge_self", "leave_room", "key_prepare", "key_offer", "key_ready", "key_commit", "key_abort", "join_key_offer", "join_key_ready", "device_key_update":
+		return true
+	default:
+		return false
+	}
+}
+
+func requiresSignature(t string) bool {
+	switch t {
+	case "group_msg", "private_msg", "recipient_ack", "chunk", "purge_self", "leave_room", "key_prepare", "key_offer", "key_ready", "key_commit", "key_abort", "join_key_offer", "join_key_ready", "device_key_update":
 		return true
 	default:
 		return false

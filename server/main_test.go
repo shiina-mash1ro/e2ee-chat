@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -184,8 +186,9 @@ func TestWSServerAckAndBroadcast(t *testing.T) {
 		Type:     "group_msg",
 		Room:     "testroom",
 		From:     "client_sender1",
-		Protocol: 2,
+		Protocol: 3,
 		MsgID:    "msg_1",
+		Signature: make([]byte, 64),
 	}
 	body, err := msgpack.Marshal(outbound)
 	if err != nil {
@@ -227,8 +230,9 @@ func TestWSPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 		Room:     "testroom",
 		From:     "client_sender1",
 		To:       "client_receiver",
-		Protocol: 2,
+		Protocol: 3,
 		MsgID:    "msg_private",
+		Signature: make([]byte, 64),
 	}
 	body, err := msgpack.Marshal(outbound)
 	if err != nil {
@@ -550,15 +554,52 @@ func wsURL(serverURL, path string) string {
 }
 
 func TestWSRejectsInvalidEventType(t *testing.T) {
-	err := validateWSEvent(wsEnvelope{Type: "bad", Room: "testroom", From: "client_sender1", Protocol: 2}, "testroom", "client_sender1")
+	err := validateWSEvent(wsEnvelope{Type: "bad", Room: "testroom", From: "client_sender1", Protocol: 3}, "testroom", "client_sender1")
 	if err == nil {
 		t.Fatal("invalid ws event type accepted")
 	}
 }
 
 func TestWSRejectsRoomMismatch(t *testing.T) {
-	err := validateWSEvent(wsEnvelope{Type: "hello", Room: "other", From: "client_sender1", Protocol: 2}, "testroom", "client_sender1")
+	err := validateWSEvent(wsEnvelope{Type: "hello", Room: "other", From: "client_sender1", Protocol: 3}, "testroom", "client_sender1")
 	if err == nil {
 		t.Fatal("room mismatch accepted")
+	}
+}
+
+func TestWSRejectsLegacyProtocol(t *testing.T) {
+	err := validateWSEvent(wsEnvelope{Type: "group_msg", Room: "testroom", From: "client_sender1", Protocol: 2, MsgID: "legacy", Signature: make([]byte, 64)}, "testroom", "client_sender1")
+	if err == nil {
+		t.Fatal("protocol v2 event accepted")
+	}
+}
+
+func TestSSERequiresBase64BinaryFields(t *testing.T) {
+	event := inboundEvent{Type: "hello", Room: "testroom", From: "client_sender1", Protocol: 3, SenderKeyID: "key_1", PublicKey: "not-base64", SignPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), HelloMAC: base64.StdEncoding.EncodeToString(make([]byte, 32)), Signature: base64.StdEncoding.EncodeToString(make([]byte, 64))}
+	if err := validateSSEEvent(event); err == nil {
+		t.Fatal("invalid SSE base64 accepted")
+	}
+}
+
+func TestTransportConversionPreservesBinaryBytes(t *testing.T) {
+	want := []byte{0, 1, 2, 253, 254, 255}
+	event := inboundEvent{Type: "group_msg", Room: "testroom", From: "client_sender1", Protocol: 3, MsgID: "msg_1", Signature: base64.StdEncoding.EncodeToString(make([]byte, 64)), Ciphertext: base64.StdEncoding.EncodeToString(want)}
+	wsEvent, err := event.toWS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(wsEvent.Ciphertext, want) {
+		t.Fatalf("binary conversion = %v, want %v", wsEvent.Ciphertext, want)
+	}
+	body, err := msgpack.Marshal(wsEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := msgpack.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := decoded["ciphertext"].([]byte); !ok {
+		t.Fatalf("websocket ciphertext encoded as %T, want MessagePack binary", decoded["ciphertext"])
 	}
 }

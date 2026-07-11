@@ -29,9 +29,8 @@ self.addEventListener("message", (event) => {
   }
 });
 
-function groupEncrypt({ payload, roomId, roomKey }) {
+function groupEncrypt({ payload, additionalData, roomKey }) {
   const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-  const additionalData = sodium.from_string(`room:${roomId}`);
   const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
     encode(payload),
     additionalData,
@@ -42,8 +41,7 @@ function groupEncrypt({ payload, roomId, roomKey }) {
   return { nonce, ciphertext };
 }
 
-function groupDecrypt({ nonce, ciphertext, roomId, roomKey }) {
-  const additionalData = sodium.from_string(`room:${roomId}`);
+function groupDecrypt({ nonce, ciphertext, additionalData, roomKey }) {
   const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
     null,
     ciphertext,
