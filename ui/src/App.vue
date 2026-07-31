@@ -192,7 +192,15 @@
                 </n-scrollbar>
               </aside>
 
-              <section class="conversation">
+              <section
+                class="conversation"
+                :class="{ 'drag-active': fileDragActive }"
+                @dragenter.prevent="onFileDragEnter"
+                @dragover.prevent="onFileDragOver"
+                @dragleave.prevent="onFileDragLeave"
+                @drop.prevent="onFileDrop"
+              >
+                <div v-if="fileDragActive" class="file-drop-overlay">松开以添加文件</div>
                 <n-scrollbar ref="messageScrollRef" class="messages">
                   <div class="message-stack">
                     <article
@@ -211,7 +219,14 @@
                           <div class="byline">
                             <span>{{ messageLabel(message) }}</span>
                             <span v-if="isMessageBusy(message)" class="message-spinner" title="发送中"></span>
-                            <span v-else-if="message.status === 'failed'" class="message-status" :title="message.failureReason || '发送失败'">!</span>
+                            <button
+                              v-else-if="message.status === 'failed'"
+                              type="button"
+                              class="message-status"
+                              :title="`${message.failureReason || '发送失败'}；点击重新发送`"
+                              aria-label="重新发送失败的消息"
+                              @click="retryMessage(message)"
+                            >!</button>
                           </div>
                           <div v-if="message.kind === 'code'" class="code-block">
                             <div class="code-block-head">
@@ -433,6 +448,7 @@ const messageScrollRef = ref(null);
 const fileInputRef = ref(null);
 const selectedFile = ref(null);
 const selectedFileUrl = ref("");
+const fileDragActive = ref(false);
 const cryptoReady = ref(false);
 const joinCode = ref("");
 const customCode = ref("");
@@ -467,6 +483,7 @@ let connectionToken = "";
 let activeSendOperations = 0;
 let pendingWSUpgrade = null;
 let imagePreviewPan = null;
+let fileDragDepth = 0;
 let cryptoWorker = null;
 let cryptoJobSeq = 0;
 const maxFileBytes = 20 * 1024 * 1024;
@@ -1191,8 +1208,7 @@ function finishSendOperation() {
   wakeWSRecovery();
 }
 
-async function sendPayload(payload, sendContext) {
-  const to = selectedPeer.value;
+async function sendPayload(payload, sendContext, to = selectedPeer.value) {
   const msgId = nextMessageId();
   const localMessage = {
     id: msgId,
@@ -1218,6 +1234,32 @@ async function sendPayload(payload, sendContext) {
   } catch (err) {
     markMessageFailed(msgId, err.message || String(err));
     throw err;
+  }
+}
+
+async function retryMessage(message) {
+  if (!message?.mine || message.status !== "failed") return;
+
+  let sendContext = null;
+  try {
+    sendContext = beginSendOperation();
+    const payload = {
+      kind: message.kind,
+      text: message.text || "",
+      file: message.file || null,
+      sent_at: Date.now(),
+    };
+    const limit = sendContext.mode === "sse" ? fallbackMaxFileBytes : maxFileBytes;
+    if (payload.file && payload.file.size > limit) {
+      throw new Error(`File cannot exceed ${formatBytes(limit)} in the current connection mode.`);
+    }
+    const index = messages.value.findIndex((item) => item.id === message.id);
+    if (index >= 0) messages.value.splice(index, 1);
+    await sendPayload(payload, sendContext, message.privateTo || "");
+  } catch (err) {
+    showError(err);
+  } finally {
+    if (sendContext) finishSendOperation();
   }
 }
 
@@ -1973,6 +2015,36 @@ function onFileSelected(event) {
   setSelectedFile(file);
 }
 
+function onFileDragEnter(event) {
+  if (!canSend.value || !hasDraggedFiles(event)) return;
+  fileDragDepth += 1;
+  fileDragActive.value = true;
+}
+
+function onFileDragOver(event) {
+  if (!canSend.value || !hasDraggedFiles(event)) return;
+  event.dataTransfer.dropEffect = "copy";
+  fileDragActive.value = true;
+}
+
+function onFileDragLeave() {
+  if (!fileDragActive.value) return;
+  fileDragDepth = Math.max(0, fileDragDepth - 1);
+  if (fileDragDepth === 0) fileDragActive.value = false;
+}
+
+function onFileDrop(event) {
+  fileDragDepth = 0;
+  fileDragActive.value = false;
+  if (!canSend.value) return;
+  const file = event.dataTransfer?.files?.[0] || null;
+  if (file) setSelectedFile(file);
+}
+
+function hasDraggedFiles(event) {
+  return Array.from(event.dataTransfer?.types || []).includes("Files");
+}
+
 function onMessagePaste(event) {
   const items = Array.from(event.clipboardData?.items || []);
   const imageItem = items.find((item) => item.kind === "file" && item.type.startsWith("image/"));
@@ -2689,12 +2761,28 @@ function shortId(id) {
 }
 
 .conversation {
+  position: relative;
   min-width: 0;
   min-height: 0;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   grid-auto-rows: auto;
   overflow: hidden;
+}
+
+.file-drop-overlay {
+  position: absolute;
+  inset: 12px;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--status);
+  border-radius: 12px;
+  color: var(--status);
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  font-size: 18px;
+  font-weight: 700;
+  pointer-events: none;
 }
 
 .messages {
@@ -2806,6 +2894,8 @@ function shortId(id) {
 }
 
 .message-status {
+  padding: 0;
+  border: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2817,6 +2907,16 @@ function shortId(id) {
   font-size: 12px;
   font-weight: 800;
   line-height: 1;
+  cursor: pointer;
+  appearance: none;
+}
+
+.message-status:hover,
+.message-status:focus-visible {
+  background: #b42318;
+  transform: scale(1.08);
+  outline: 2px solid color-mix(in srgb, #d92d20 35%, transparent);
+  outline-offset: 2px;
 }
 
 .message-spinner {
