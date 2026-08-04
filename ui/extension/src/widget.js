@@ -1,6 +1,7 @@
 import "./widget.css";
 import { createClientChannel, ensureCore } from "./channel.js";
 import { installCustomCss } from "./custom-css.js";
+import { headsetIcon } from "./icons.js";
 
 const standalone = window.parent === window;
 const app = document.querySelector("#app");
@@ -27,7 +28,7 @@ function syncUrls() { const ids = new Set(state.messages.filter((message) => mes
 
 function render() {
   if (!expanded) {
-    app.innerHTML = `<section class="widget collapsed"><button class="launcher-button" id="expand" title="展开聊天">💬</button></section>`;
+    app.innerHTML = `<section class="widget collapsed"><button class="launcher-button" id="expand" title="显示客服" aria-label="显示客服">${headsetIcon("launcher-icon")}</button></section>`;
     document.querySelector("#expand").onclick = () => setExpanded(true);
     return;
   }
@@ -35,7 +36,7 @@ function render() {
   app.innerHTML = `<section class="widget" id="widget">
     ${standalone ? "" : '<div class="resize-handle" id="resize"></div>'}
     <header class="header">
-      <strong class="room-title">${state.roomId ? esc(state.roomId) : "E2EE Chat"}</strong>
+      <strong class="room-title">${state.roomId ? esc(state.roomId) : "显示客服"}</strong>
       <button id="members">成员</button><button id="details">详情</button><button id="collapse" title="折叠">—</button>
     </header>
     ${notice ? `<div class="notice-bar"><span>${esc(notice)}</span><button id="closeNotice">×</button></div>` : ""}
@@ -55,7 +56,7 @@ function render() {
 }
 
 function renderMessages() {
-  if (!state.roomId) return `<div class="empty"><p>尚未进入聊天室</p><button id="openSettings">配置服务地址</button><p class="muted">通过扩展图标创建或加入房间。</p></div>`;
+  if (!state.roomId) return `<div class="empty"><p>尚未进入聊天室</p><button id="openLauncher">新建或加入房间</button><button id="openSettings">配置服务地址</button></div>`;
   if (!state.messages.length) return `<div class="empty">${esc(state.status)}<br><span class="muted">所有窗口将显示同一聊天室</span></div>`;
   return state.messages.map((message) => {
     const privateClass = message.privateTo ? "private" : "";
@@ -87,6 +88,7 @@ function bind() {
   document.querySelector("#details").onclick = () => { drawer = drawer === "details" ? "" : "details"; render(); };
   document.querySelector("#closeNotice")?.addEventListener("click", () => { notice = ""; render(); });
   document.querySelector("#openSettings")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
+  document.querySelector("#openLauncher")?.addEventListener("click", () => chrome.runtime.sendMessage({ type: "open-launcher" }));
   document.querySelector("#file").onclick = () => document.querySelector("#fileInput").click();
   document.querySelector("#fileInput").onchange = (event) => { selectedFile = event.target.files?.[0] || null; render(); };
   document.querySelector("#clearFile")?.addEventListener("click", () => { selectedFile = null; render(); });
@@ -171,3 +173,4 @@ channel = createClientChannel("widget", (message) => {
 });
 chrome.runtime.sendMessage({ type: "widget-active" });
 render();
+if (!standalone) parent.postMessage({ source: "e2ee-chat-widget", type: "ready" }, "*");

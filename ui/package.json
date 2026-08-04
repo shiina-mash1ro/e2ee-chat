@@ -14,6 +14,7 @@
     "test:extension": "node --test scripts/test-extension-helpers.mjs"
   },
   "dependencies": {
+    "@fortawesome/free-solid-svg-icons": "^7.3.1",
     "@msgpack/msgpack": "^3.1.3",
     "@vitejs/plugin-vue": "^6.0.1",
     "libsodium-wrappers": "^0.8.4",

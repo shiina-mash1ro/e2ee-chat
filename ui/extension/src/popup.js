@@ -5,7 +5,7 @@ import { validateChatOrigin } from "./origin.js";
 const app = document.querySelector("#app");
 app.innerHTML = `
   <section class="card" style="width:370px;min-height:520px;border:0;border-radius:0;box-shadow:none">
-    <div class="row"><h1 class="grow" style="margin:0">临时群聊</h1><button id="settings">设置</button></div>
+    <div class="row"><h1 class="grow" style="margin:0">显示客服</h1><button id="settings">设置</button></div>
     <div id="unconfigured" class="notice hidden" style="margin-top:16px"><span id="availability">请先配置并验证聊天服务地址。</span><div class="row" style="margin-top:8px"><button id="retry">重试</button><button id="configure">去配置</button></div></div>
     <div id="notice" class="notice hidden" style="margin-top:16px"></div>
     <div id="current" class="muted" style="margin:14px 0">当前没有聊天室</div>

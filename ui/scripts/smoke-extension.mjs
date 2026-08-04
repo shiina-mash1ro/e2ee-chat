@@ -5,6 +5,8 @@ import fs from "node:fs/promises";
 
 const extensionPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../dist/extension");
 const baseURL = process.env.BASE_URL || "http://127.0.0.1:8080";
+const screenshotDir = process.env.SCREENSHOT_DIR ? path.resolve(process.env.SCREENSHOT_DIR) : "";
+if (screenshotDir) await fs.mkdir(screenshotDir, { recursive: true });
 const manifestPath = path.join(extensionPath, "manifest.json");
 const originalManifest = await fs.readFile(manifestPath, "utf8");
 const testManifest = JSON.parse(originalManifest);
@@ -20,6 +22,8 @@ try {
   let worker = context.serviceWorkers()[0];
   if (!worker) worker = await context.waitForEvent("serviceworker");
   const extensionId = new URL(worker.url()).host;
+
+  if (testManifest.name !== "显示客服" || testManifest.action?.default_popup) throw new Error("extension action was not configured to show the customer-service widget");
 
   const options = await context.newPage();
   await options.goto(`chrome-extension://${extensionId}/options.html`);
@@ -62,11 +66,28 @@ try {
   const host = await context.newPage();
   await host.goto(baseURL);
   await host.bringToFront();
-  const injected = await options.evaluate(() => chrome.runtime.sendMessage({ type: "show-widget", expand: true }));
+  const hostTabId = await options.evaluate(async (origin) => (await chrome.tabs.query({ url: `${new URL(origin).origin}/*` })).find((tab) => !String(tab.url || "").includes("chrome-extension://"))?.id, baseURL);
+  if (hostTabId == null) throw new Error("could not resolve host tab for widget injection");
+  await options.evaluate(async (tabId) => {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content-script.js"] });
+    await chrome.tabs.sendMessage(tabId, { type: "widget-expand" });
+  }, hostTabId);
+  const injected = { embedded: true };
   await options.waitForTimeout(500);
   const embeddedContexts = await worker.evaluate(() => chrome.runtime.getContexts({ contextTypes: ["TAB"] }));
   if (injected.embedded === false && !embeddedContexts.some((item) => item.documentUrl?.includes("/standalone.html"))) throw new Error("restricted-page fallback did not open a standalone chat window");
   if ((await host.locator("body").textContent()).includes("#k=")) throw new Error("host page could read room secret");
+  if (injected.embedded) {
+    const widgetFrame = host.frames().find((frame) => new URL(frame.url()).pathname.endsWith("/widget.html"));
+    if (!widgetFrame) throw new Error("embedded customer-service frame was not created");
+    await widgetFrame.locator(".widget:not(.collapsed)").waitFor({ timeout: 5000 });
+    await widgetFrame.locator("#collapse").click();
+    await widgetFrame.locator('.launcher-icon[data-icon="headset"]').waitFor();
+    if (screenshotDir) await widgetFrame.locator(".widget.collapsed").screenshot({ path: path.join(screenshotDir, "customer-service-launcher.png") });
+    await options.evaluate((tabId) => chrome.tabs.sendMessage(tabId, { type: "widget-expand" }), hostTabId);
+    await widgetFrame.locator(".widget:not(.collapsed)").waitFor({ timeout: 5000 });
+    if (screenshotDir) await widgetFrame.locator(".widget:not(.collapsed)").screenshot({ path: path.join(screenshotDir, "customer-service-expanded.png") });
+  }
 
   const first = await context.newPage();
   const second = await context.newPage();
@@ -74,8 +95,15 @@ try {
     first.goto(`chrome-extension://${extensionId}/standalone.html`),
     second.goto(`chrome-extension://${extensionId}/standalone.html`),
   ]);
-  await first.locator(".room-title").filter({ hasNotText: "E2EE Chat" }).waitFor({ timeout: 15000 });
+  await first.locator(".room-title").filter({ hasNotText: "显示客服" }).waitFor({ timeout: 15000 });
   if (await first.locator(".room-title").evaluate((node) => getComputedStyle(node).letterSpacing) !== "1px") throw new Error("custom CSS was not applied to chat windows");
+  if (screenshotDir) {
+    await first.locator("#collapse").click();
+    await first.locator('.launcher-icon[data-icon="headset"]').waitFor();
+    await first.locator(".widget.collapsed").screenshot({ path: path.join(screenshotDir, "customer-service-launcher.png") });
+    await first.locator("#expand").click();
+    await first.locator(".widget:not(.collapsed)").screenshot({ path: path.join(screenshotDir, "customer-service-expanded.png") });
+  }
   const room = await first.locator(".room-title").textContent();
   if (!room || await second.locator(".room-title").textContent() !== room) throw new Error("extension windows did not share one room");
 
@@ -93,6 +121,7 @@ try {
   for (const page of context.pages()) {
     if (/\/(standalone|widget)\.html$/.test(new URL(page.url()).pathname)) await page.close();
   }
+  await host.close();
   await options.waitForTimeout(32000);
   const remainingOffscreen = await options.evaluate(() => chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] }));
   const session = await options.evaluate(() => chrome.storage.session.get("chatSession"));

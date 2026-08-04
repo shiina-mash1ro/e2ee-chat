@@ -5,7 +5,7 @@ import { MAX_CUSTOM_CSS_BYTES, validateCustomCss } from "./custom-css.js";
 const app = document.querySelector("#app");
 app.innerHTML = `
   <section class="card" style="max-width:680px;margin:40px auto">
-    <h1>E2EE Chat 扩展设置</h1>
+    <h1>显示客服 · 设置</h1>
     <p class="muted">首次使用必须填写聊天服务地址。扩展不会预置服务器。</p>
     <div id="notice" class="notice hidden"></div>
     <label>聊天服务地址
@@ -17,13 +17,14 @@ app.innerHTML = `
     </div>
     <hr style="margin:24px 0;border:0;border-top:1px solid #dce3ec">
     <h2>快捷键</h2>
-    <p>紧急动作快捷键：<strong id="shortcut">未绑定</strong></p>
+    <p>显示客服：<strong id="showShortcut">未绑定</strong></p>
+    <p>绿色出口：<strong id="shortcut">未绑定</strong></p>
     <button id="shortcuts">打开浏览器快捷键设置</button>
-    <label>快捷键执行内容
+    <label>绿色出口执行内容
       <select id="panicAction"><option value="wipe">紧急清除（默认）</option><option value="uninstall">静默卸载扩展</option></select>
     </label>
-    <p class="muted">快捷键或下方按钮都需要在 3 秒内触发两次。卸载前也会尽力退出房间并清除临时数据。</p>
-    <button id="panic" class="danger">执行紧急清除</button>
+    <p class="muted">绿色出口快捷键或下方按钮都需要在 3 秒内触发两次。卸载前也会尽力退出房间并清除临时数据。</p>
+    <button id="panic" class="danger">绿色出口：清除临时数据</button>
     <hr style="margin:24px 0;border:0;border-top:1px solid #dce3ec">
     <h2>浏览器安全 DNS</h2>
     <p class="muted">聊天连接遵循浏览器或操作系统的 DNS 设置。扩展无法读取或强制指定 DoH/DoT 状态。</p>
@@ -60,11 +61,12 @@ async function load() {
   updatePanicLabel();
   document.querySelector("#cssStatus").textContent = local.customCssName ? `${local.customCssName}（${local.customCssBytes || 0} bytes）` : "未导入";
   const commands = await chrome.commands.getAll();
+  document.querySelector("#showShortcut").textContent = commands.find((item) => item.name === "_execute_action")?.shortcut || "未绑定";
   document.querySelector("#shortcut").textContent = commands.find((item) => item.name === "panic-action")?.shortcut || "未绑定";
 }
 
 function updatePanicLabel() {
-  panicButton.textContent = panicAction.value === "uninstall" ? "静默卸载扩展" : "执行紧急清除";
+  panicButton.textContent = panicAction.value === "uninstall" ? "绿色出口：静默卸载" : "绿色出口：清除临时数据";
 }
 
 document.querySelector("#save").addEventListener("click", async () => {
@@ -105,7 +107,7 @@ panicAction.addEventListener("change", async () => {
 panicButton.addEventListener("click", async () => {
   try {
     const response = await chrome.runtime.sendMessage({ type: "trigger-panic" });
-    if (!response?.ok) throw new Error(response?.error || "紧急动作执行失败");
+    if (!response?.ok) throw new Error(response?.error || "绿色出口执行失败");
     if (response.armed) {
       panicButton.textContent = response.action === "uninstall" ? "3 秒内再次点击以卸载" : "3 秒内再次点击以清除";
       setTimeout(updatePanicLabel, 3100);

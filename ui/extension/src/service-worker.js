@@ -49,11 +49,16 @@ chrome.commands.onCommand.addListener(async (command) => {
     await chrome.notifications.create("e2ee-chat-panic-armed", {
       type: "basic",
       iconUrl: chrome.runtime.getURL("chat.svg"),
-      title: "紧急动作待确认",
+      title: "绿色出口待确认",
       message: `请在 3 秒内再次按下快捷键以${result.action === "uninstall" ? "卸载扩展" : "清除临时数据"}`,
       priority: 2,
     });
   }
+});
+
+chrome.action.onClicked.addListener(async () => {
+  await ensureOffscreen();
+  await showWidget(false);
 });
 
 async function triggerPanicAction() {
@@ -120,6 +125,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case "show-widget":
         await ensureOffscreen();
         return { ok: true, ...(await showWidget(Boolean(message.expand))) };
+      case "open-launcher":
+        await chrome.windows.create({ url: chrome.runtime.getURL("popup.html"), type: "popup", width: 420, height: 650, focused: true });
+        return { ok: true };
       case "widget-active":
         if (sender.tab?.id) lastWidgetTabId = sender.tab.id;
         return { ok: true };
