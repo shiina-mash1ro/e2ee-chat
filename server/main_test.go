@@ -126,15 +126,18 @@ func TestJoinCodeRoomAcceptsCustomCode(t *testing.T) {
 	}
 }
 
-func TestJoinCodeRoomRejectsAmbiguousCode(t *testing.T) {
+func TestJoinCodeRoomAcceptsPreviouslyAmbiguousCode(t *testing.T) {
 	h := newHub()
 	h.powDifficulty = 8
-	req := httptest.NewRequest(http.MethodPut, "/api/code-room", strings.NewReader(`{"code":"ROOM01","pow":`+mustProofJSON(t, h, "203.0.113.31")+`}`))
+	req := httptest.NewRequest(http.MethodPut, "/api/code-room", strings.NewReader(`{"code":"room-01-il","pow":`+mustProofJSON(t, h, "203.0.113.31")+`}`))
 	req.RemoteAddr = "203.0.113.31:12345"
 	rec := httptest.NewRecorder()
 	h.codeRoomHandler(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("ambiguous code status = %d, want 400", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("previously ambiguous code status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "/r/ROOM01IL#p=ROOM01IL") {
+		t.Fatalf("custom code response did not preserve ambiguous characters: %s", rec.Body.String())
 	}
 }
 

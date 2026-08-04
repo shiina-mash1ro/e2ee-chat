@@ -67,7 +67,7 @@
                 />
                 <n-button type="primary" attr-type="submit" :loading="codeBusy" :disabled="!validJoinCode">用群聊码加入</n-button>
               </n-form>
-              <p class="weak-note">群聊码支持旧数字码，或 4-32 位 A-Z 和 2-9 自定义码。</p>
+              <p class="weak-note">群聊码支持 4-32 位 A-Z 和 0-9 自定义码。</p>
             </n-space>
           </n-card>
 
@@ -701,7 +701,7 @@ function createCodeRoom() {
   if (!cryptoReady.value) return;
   const code = normalizeCode(customCode.value);
   if (customCode.value.trim() && !isValidCode(code)) {
-    notice.value = "群聊码可用 4/6 位数字，或 4-32 位 A-Z 和 2-9，字母码不能包含 0/1/I/L/O。";
+    notice.value = "群聊码可用 4-32 位 A-Z 和 0-9。";
     return;
   }
   requestCodeRoom("POST", code).catch(showError);
@@ -710,7 +710,7 @@ function createCodeRoom() {
 function joinCodeRoom() {
   const code = normalizeCode(joinCode.value);
   if (!isValidCode(code)) {
-    notice.value = "群聊码可用 4/6 位数字，或 4-32 位 A-Z 和 2-9，字母码不能包含 0/1/I/L/O。";
+    notice.value = "群聊码可用 4-32 位 A-Z 和 0-9。";
     return;
   }
   requestCodeRoom("PUT", code).catch(showError);
@@ -2301,7 +2301,7 @@ function normalizeCode(value) {
 
 function isValidCode(value) {
   const code = normalizeCode(value);
-  return /^(?:\d{4}|\d{6}|[ABCDEFGHJKMNPQRSTUVWXYZ2-9]{4,32})$/.test(code);
+  return /^[A-Z0-9]{4,32}$/.test(code);
 }
 
 function cleanFileName(value) {

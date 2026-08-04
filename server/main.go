@@ -39,7 +39,7 @@ const (
 var (
 	roomIDRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{3,64}$`)
 	clientIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{8,96}$`)
-	codeRe     = regexp.MustCompile(`^(?:\d{4}|\d{6}|[ABCDEFGHJKMNPQRSTUVWXYZ2-9]{4,32})$`)
+	codeRe     = regexp.MustCompile(`^[A-Z0-9]{4,32}$`)
 )
 
 type Hub struct {
