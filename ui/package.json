@@ -6,8 +6,12 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
+    "build:extension": "vite build --config vite.extension.config.js",
+    "build:all": "npm run build && npm run build:extension",
     "preview": "vite preview --host 127.0.0.1",
-    "smoke": "node scripts/smoke-chat.mjs"
+    "smoke": "node scripts/smoke-chat.mjs",
+    "smoke:extension": "node scripts/smoke-extension.mjs",
+    "test:extension": "node --test scripts/test-extension-helpers.mjs"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.1.3",

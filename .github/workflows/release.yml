@@ -42,9 +42,9 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      - name: Build frontend
+      - name: Build frontend and extension
         working-directory: ui
-        run: npm run build
+        run: npm run build:all
 
       - name: Test server
         working-directory: server
@@ -66,8 +66,8 @@ jobs:
 
           (
             cd server
-            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/e2ee-chat-deploy/e2ee-chat .
-            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o ../dist/e2ee-chat-deploy/bin/e2ee-chat-windows-amd64.exe .
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.buildVersion=${GITHUB_SHA}" -o ../dist/e2ee-chat-deploy/e2ee-chat .
+            CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w -X main.buildVersion=${GITHUB_SHA}" -o ../dist/e2ee-chat-deploy/bin/e2ee-chat-windows-amd64.exe .
           )
 
           chmod +x dist/e2ee-chat-deploy/e2ee-chat dist/e2ee-chat-deploy/start.sh
@@ -76,6 +76,7 @@ jobs:
             cd dist
             zip -r e2ee-chat-deploy.zip e2ee-chat-deploy
             tar -czf e2ee-chat-deploy.tar.gz e2ee-chat-deploy
+            (cd extension && zip -r ../e2ee-chat-extension.zip .)
           )
 
       - name: Resolve release tag
@@ -114,12 +115,12 @@ jobs:
             prerelease_flag=(--prerelease)
           fi
 
-          notes=$(printf 'Built from %s.\n\nArtifacts:\n- e2ee-chat-deploy.zip\n- e2ee-chat-deploy.tar.gz' "$GITHUB_SHA")
+          notes=$(printf 'Built from %s.\n\nArtifacts:\n- e2ee-chat-deploy.zip\n- e2ee-chat-deploy.tar.gz\n- e2ee-chat-extension.zip' "$GITHUB_SHA")
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz --clobber
+            gh release upload "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz dist/e2ee-chat-extension.zip --clobber
           else
-            gh release create "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz \
+            gh release create "$TAG" dist/e2ee-chat-deploy.zip dist/e2ee-chat-deploy.tar.gz dist/e2ee-chat-extension.zip \
               --target "$GITHUB_SHA" \
               --title "$TAG" \
               --notes "$notes" \

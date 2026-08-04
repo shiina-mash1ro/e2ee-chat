@@ -37,9 +37,10 @@ const (
 )
 
 var (
-	roomIDRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{3,64}$`)
-	clientIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{8,96}$`)
-	codeRe     = regexp.MustCompile(`^[A-Z0-9]{4,32}$`)
+	roomIDRe     = regexp.MustCompile(`^[A-Za-z0-9_-]{3,64}$`)
+	clientIDRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{8,96}$`)
+	codeRe       = regexp.MustCompile(`^[A-Z0-9]{4,32}$`)
+	buildVersion = "dev"
 )
 
 type Hub struct {
@@ -640,6 +641,7 @@ func main() {
 
 	hub := newHub()
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/extension-info", extensionInfoHandler)
 	mux.HandleFunc("/api/pow-challenge", hub.powChallengeHandler)
 	mux.HandleFunc("/api/code-room", hub.codeRoomHandler)
 	mux.HandleFunc("/api/rooms/", hub.apiHandler)
@@ -648,7 +650,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           securityHeaders(mux),
+		Handler:           extensionCORS(securityHeaders(mux), os.Getenv("EXTENSION_ORIGINS")),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -658,15 +660,52 @@ func main() {
 	}
 }
 
+func extensionInfoHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"app":          "e2ee-chat",
+		"extensionApi": 1,
+		"protocol":     3,
+		"build":        buildVersion,
+	})
+}
+
+func extensionCORS(next http.Handler, configured string) http.Handler {
+	allowed := make(map[string]struct{})
+	for _, value := range strings.Split(configured, ",") {
+		origin := strings.TrimSpace(value)
+		if strings.HasPrefix(origin, "chrome-extension://") || strings.HasPrefix(origin, "extension://") {
+			allowed[origin] = struct{}{}
+		}
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if _, ok := allowed[origin]; ok {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Connection-Token")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' ws: wss:; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; worker-src 'self'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
-		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-			w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-		}
 		next.ServeHTTP(w, r)
 	})
 }

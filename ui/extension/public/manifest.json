@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "E2EE Chat Widget",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx4w8sYnT4bR6RtgcnFoaCiizXjLmR5ALvkDnH1h10TuoUyBvWRXjW2uGcV8iVKKog2H+37hu8nVi65G8JPT7/BWdMm5yQEBaAddFf8t4E31fohAFe4KXp8Z4deAwKxyCVQoyDaJgwgNt0DyiDP+Ynt+uF/Q2sEqUKK5WiMXW1dDsjIWSK0DPH6Gkh8Qs7CgK9MA58D4zoMPUp5pmH0n5H9IhaYq6pwQ6ILIyW90hNOZEjZ1pWC3T2SMPElBF+mgzJLEMdNosnOHzDWXtlsbanu6zOTUFmzUAe6Wb55YJCy/YMCyBHg8JJv68POb4fIl+zNi55RuBs2Y6gatttXDV6QIDAQAB",
+  "description": "在当前页面打开共享的临时聊天室。",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "storage", "offscreen", "notifications"],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "assets/serviceWorker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "E2EE Chat",
+    "default_popup": "popup.html"
+  },
+  "options_page": "options.html",
+  "commands": {
+    "panic-action": {
+      "description": "执行设置中选择的紧急动作"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["widget.html", "assets/*"],
+      "matches": ["http://*/*", "https://*/*"],
+      "use_dynamic_url": true
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; connect-src https: wss: http://localhost:* ws://localhost:* http://127.0.0.1:* ws://127.0.0.1:*; worker-src 'self'; img-src 'self' blob: data:"
+  }
+}

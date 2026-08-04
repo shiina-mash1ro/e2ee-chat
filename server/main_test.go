@@ -17,6 +17,84 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
+func TestSecurityHeadersOwnedByApplication(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
+		t.Fatalf("CSP = %q, want frame-ancestors 'none'", got)
+	}
+	for name, want := range map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"Referrer-Policy":        "no-referrer",
+	} {
+		if got := rec.Header().Get(name); got != want {
+			t.Fatalf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("unexpected broad CORS header %q", got)
+	}
+	if got := rec.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Fatalf("application emitted edge-owned HSTS header %q", got)
+	}
+}
+
+func TestExtensionCORSRequiresExactConfiguredOrigin(t *testing.T) {
+	handler := extensionCORS(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }), "chrome-extension://abcdefghijklmnop, https://ignored.example")
+	for _, test := range []struct{ origin, want string }{
+		{"chrome-extension://abcdefghijklmnop", "chrome-extension://abcdefghijklmnop"},
+		{"chrome-extension://other", ""},
+		{"https://ignored.example", ""},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/pow-challenge", nil)
+		req.Header.Set("Origin", test.origin)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Origin"); got != test.want {
+			t.Fatalf("origin %q allowed as %q, want %q", test.origin, got, test.want)
+		}
+	}
+}
+
+func TestExtensionInfoIdentifiesCompatibleService(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(extensionInfoHandler))
+	req := httptest.NewRequest(http.MethodGet, "/api/extension-info", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "application/json") {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var info struct {
+		App          string `json:"app"`
+		ExtensionAPI int    `json:"extensionApi"`
+		Protocol     int    `json:"protocol"`
+		Build        string `json:"build"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if info.App != "e2ee-chat" || info.ExtensionAPI != 1 || info.Protocol != 3 || info.Build == "" {
+		t.Fatalf("unexpected extension info: %+v", info)
+	}
+
+	post := httptest.NewRecorder()
+	extensionInfoHandler(post, httptest.NewRequest(http.MethodPost, "/api/extension-info", nil))
+	if post.Code != http.StatusMethodNotAllowed || post.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("POST status/allow = %d/%q", post.Code, post.Header().Get("Allow"))
+	}
+}
+
 func TestCodeRoomRateLimitByRemoteIP(t *testing.T) {
 	h := newHub()
 	h.powDifficulty = 8

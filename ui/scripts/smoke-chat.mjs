@@ -11,6 +11,7 @@ let recoveryInviteURL = "";
 const browser = await chromium.launch({ headless: true });
 
 try {
+  await runPopupModeSmoke();
   await runFullLinkSmoke();
   await runSSERecoverySmoke();
   await runCodeSmoke();
@@ -19,9 +20,100 @@ try {
   await browser.close();
 }
 
+async function runPopupModeSmoke() {
+  const context = await browser.newContext();
+  await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(baseURL).origin });
+  try {
+    const opener = await context.newPage();
+    await opener.goto(baseURL, { waitUntil: "domcontentloaded" });
+    const popupSwitch = opener.getByRole("switch", { name: "独立窗口模式" });
+    if (await popupSwitch.getAttribute("aria-checked") !== "true") {
+      throw new Error("popup mode should default to enabled");
+    }
+    await popupSwitch.click();
+    await opener.reload({ waitUntil: "domcontentloaded" });
+    if (await opener.getByRole("switch", { name: "独立窗口模式" }).getAttribute("aria-checked") !== "false") {
+      throw new Error("disabled popup mode was not persisted");
+    }
+    await opener.getByRole("switch", { name: "独立窗口模式" }).click();
+
+    const popupPromise = opener.waitForEvent("popup");
+    await opener.getByRole("button", { name: "创建大力房间" }).click();
+    const roomPage = await popupPromise;
+    await roomPage.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
+    await enterName(roomPage, "Popup owner");
+    await roomPage.getByRole("button", { name: "复制邀请链接" }).click();
+    const copied = await roomPage.evaluate(() => navigator.clipboard.readText());
+    const roomURL = new URL(roomPage.url());
+    const expected = `${roomURL.pathname.replace(/^\/+/, "")}${roomURL.hash}`;
+    if (copied !== expected) {
+      throw new Error(`relative invite copy = ${copied}, want ${expected}`);
+    }
+
+    const invalidPreferencePage = await context.newPage();
+    await invalidPreferencePage.goto(baseURL, { waitUntil: "domcontentloaded" });
+    await invalidPreferencePage.evaluate(() => localStorage.setItem("e2ee-chat-popup-mode", "invalid"));
+    await invalidPreferencePage.reload({ waitUntil: "domcontentloaded" });
+    if (await invalidPreferencePage.getByRole("switch", { name: "独立窗口模式" }).getAttribute("aria-checked") !== "true") {
+      throw new Error("invalid popup preference did not fall back to enabled");
+    }
+    console.log(JSON.stringify({ mode: "popup-window-and-relative-copy", copied }, null, 2));
+  } finally {
+    await context.close();
+  }
+
+  const blockedContext = await browser.newContext();
+  await blockedContext.addInitScript(() => {
+    window.open = () => null;
+  });
+  try {
+    const page = await blockedContext.newPage();
+    let dialogText = "";
+    page.on("dialog", async (dialog) => {
+      dialogText = dialog.message();
+      await dialog.accept();
+    });
+    await page.goto(baseURL, { waitUntil: "domcontentloaded" });
+    await page.getByRole("button", { name: "创建大力房间" }).click();
+    await page.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
+    if (!dialogText.includes("新窗口被浏览器拦截")) {
+      throw new Error(`missing popup-blocked warning: ${dialogText}`);
+    }
+    console.log(JSON.stringify({ mode: "popup-blocked-fallback" }, null, 2));
+  } finally {
+    await blockedContext.close();
+  }
+
+  const failedContext = await browser.newContext();
+  await failedContext.route("**/api/rooms/*/config", (route) => route.fulfill({ status: 500, body: "simulated failure" }));
+  try {
+    const page = await failedContext.newPage();
+    await page.goto(baseURL, { waitUntil: "domcontentloaded" });
+    const popupPromise = page.waitForEvent("popup");
+    await page.getByRole("button", { name: "创建大力房间" }).click();
+    const popup = await popupPromise;
+    await popup.waitForEvent("close", { timeout: 10000 });
+    const notice = page.locator(".notice");
+    await notice.waitFor({ timeout: 10000 });
+    if (!(await notice.innerText()).includes("HTTP 500")) {
+      throw new Error(`request failure notice was not preserved: ${await notice.innerText()}`);
+    }
+    console.log(JSON.stringify({ mode: "popup-request-failure-cleanup" }, null, 2));
+  } finally {
+    await failedContext.close();
+  }
+}
+
+async function useSameTabMode(context) {
+  await context.addInitScript(() => {
+    localStorage.setItem("e2ee-chat-popup-mode", "0");
+  });
+}
+
 async function runMultiRoomIsolationSmoke() {
   const context = await browser.newContext();
   try {
+    await useSameTabMode(context);
     const firstRoom = await context.newPage();
     const secondRoom = await context.newPage();
     await firstRoom.goto(baseURL, { waitUntil: "domcontentloaded" });
@@ -59,6 +151,7 @@ async function runFullLinkSmoke() {
   const contextB = await browser.newContext();
   const contextC = await browser.newContext();
   try {
+    await Promise.all([contextA, contextB, contextC].map(useSameTabMode));
     const pageA = await contextA.newPage();
     await pageA.goto(baseURL, { waitUntil: "domcontentloaded" });
     await pageA.getByRole("button", { name: "创建大力房间" }).click();
@@ -153,6 +246,7 @@ async function runCodeSmoke() {
   const contextB = await browser.newContext();
   const contextC = await browser.newContext();
   try {
+    await Promise.all([contextA, contextB, contextC].map(useSameTabMode));
     const pageA = await contextA.newPage();
     await pageA.goto(baseURL, { waitUntil: "domcontentloaded" });
     await pageA.getByRole("button", { name: "创建随机码房间" }).click();

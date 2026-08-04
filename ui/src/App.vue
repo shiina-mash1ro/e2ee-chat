@@ -27,9 +27,26 @@
               <div>
                 <h1>临时群聊</h1>
               </div>
+              <n-alert
+                v-if="notice"
+                class="notice"
+                type="error"
+                :bordered="false"
+                closable
+                @close="notice = ''"
+              >
+                {{ notice }}
+              </n-alert>
               <div class="theme-control">
                 <span>深色模式</span>
                 <n-switch v-model:value="darkMode" size="small">
+                  <template #checked>开</template>
+                  <template #unchecked>关</template>
+                </n-switch>
+              </div>
+              <div class="theme-control">
+                <span>独立窗口模式</span>
+                <n-switch v-model:value="popupMode" size="small" aria-label="独立窗口模式">
                   <template #checked>开</template>
                   <template #unchecked>关</template>
                 </n-switch>
@@ -424,6 +441,7 @@ import { decode, encode } from "@msgpack/msgpack";
 import sodium from "libsodium-wrappers";
 import { darkTheme } from "naive-ui";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { asBytes, createProtocolV3 } from "./protocol-v3.js";
 
 const roomId = ref("");
 const roomSecret = ref(null);
@@ -462,6 +480,7 @@ const roomMaxClients = ref(4);
 const memberDrawerVisible = ref(false);
 const detailVisible = ref(false);
 const darkMode = ref(readInitialDarkMode());
+const popupMode = ref(readInitialPopupMode());
 const notificationsEnabled = ref(notificationSupported() && localStorage.getItem("e2ee-chat-notifications") === "1" && Notification.permission === "granted");
 const notificationPermission = ref(notificationSupported() ? Notification.permission : "unsupported");
 const roomActionBusy = ref(false);
@@ -500,7 +519,13 @@ const incomingTransfers = new Map();
 const fileUrlCache = new WeakMap();
 const createdFileUrls = new Set();
 const cryptoJobs = new Map();
-const binaryEventFields = ["public_key", "sign_public_key", "hello_mac", "signature", "nonce", "ciphertext", "roster_hash", "sealed_key"];
+const {
+  canonicalEventBytes,
+  canonicalMessageAAD,
+  decodeWireBytes,
+  normalizeWireEvent,
+  toWireEvent,
+} = createProtocolV3(sodium);
 const epochKeys = new Map();
 const boxKeyHistory = new Map();
 const pendingEpochKeys = new Map();
@@ -582,6 +607,9 @@ const imagePreviewTransform = computed(() => ({
 }));
 
 watch(darkMode, applyTheme, { immediate: true });
+watch(popupMode, (enabled) => {
+  localStorage.setItem("e2ee-chat-popup-mode", enabled ? "1" : "0");
+}, { immediate: true });
 
 sodium.ready.then(() => {
   cryptoReady.value = true;
@@ -677,8 +705,64 @@ function startChatSession() {
   connectEvents();
 }
 
+function beginRoomNavigation() {
+  if (!popupMode.value) return { popup: null };
+
+  const availableWidth = Math.max(320, Number(window.screen?.availWidth) || window.innerWidth || 1200);
+  const availableHeight = Math.max(480, Number(window.screen?.availHeight) || window.innerHeight || 800);
+  const width = Math.min(1200, Math.max(320, availableWidth - 80));
+  const height = Math.min(900, Math.max(480, availableHeight - 80));
+  const screenLeft = Number(window.screen?.availLeft) || 0;
+  const screenTop = Number(window.screen?.availTop) || 0;
+  const left = Math.max(screenLeft, screenLeft + Math.round((availableWidth - width) / 2));
+  const top = Math.max(screenTop, screenTop + Math.round((availableHeight - height) / 2));
+  const features = [
+    "popup=yes",
+    "location=no",
+    "toolbar=no",
+    "menubar=no",
+    "status=no",
+    "resizable=yes",
+    "scrollbars=yes",
+    `width=${width}`,
+    `height=${height}`,
+    `left=${left}`,
+    `top=${top}`,
+  ].join(",");
+  const popup = window.open("about:blank", `e2ee-chat-${Date.now()}`, features);
+  if (!popup) {
+    window.alert("新窗口被浏览器拦截，将在当前标签打开。请允许本站弹出窗口后重试独立窗口模式。");
+    return { popup: null };
+  }
+  return { popup };
+}
+
+function navigateToRoom(navigation, url) {
+  const popup = navigation?.popup;
+  if (popup && !popup.closed) {
+    try {
+      popup.opener = null;
+      popup.location.replace(new URL(url, location.href).href);
+      popup.focus();
+      window.close();
+      if (!window.closed) location.replace("about:blank");
+      return;
+    } catch {
+      cancelRoomNavigation(navigation);
+      window.alert("独立窗口无法打开，将在当前标签打开。");
+    }
+  }
+  location.replace(url);
+}
+
+function cancelRoomNavigation(navigation) {
+  const popup = navigation?.popup;
+  if (popup && !popup.closed) popup.close();
+}
+
 async function createRoom() {
   if (!cryptoReady.value || roomCreateBusy.value) return;
+  const navigation = beginRoomNavigation();
   roomCreateBusy.value = true;
   const newRoomId = base64Url(sodium.randombytes_buf(12));
   const secret = sodium.randombytes_buf(32);
@@ -689,8 +773,9 @@ async function createRoom() {
       body: JSON.stringify({ max_clients: normalizedRoomMaxClients() }),
     });
     if (!response.ok) throw new Error(`创建房间失败：HTTP ${response.status}`);
-    location.href = `/r/${newRoomId}#k=${base64Url(secret)}`;
+    navigateToRoom(navigation, `/r/${newRoomId}#k=${base64Url(secret)}`);
   } catch (err) {
+    cancelRoomNavigation(navigation);
     showError(err);
   } finally {
     roomCreateBusy.value = false;
@@ -698,25 +783,34 @@ async function createRoom() {
 }
 
 function createCodeRoom() {
-  if (!cryptoReady.value) return;
+  if (!cryptoReady.value || codeBusy.value) return;
   const code = normalizeCode(customCode.value);
   if (customCode.value.trim() && !isValidCode(code)) {
     notice.value = "群聊码可用 4-32 位 A-Z 和 0-9。";
     return;
   }
-  requestCodeRoom("POST", code).catch(showError);
+  const navigation = beginRoomNavigation();
+  requestCodeRoom("POST", code, navigation).catch((err) => {
+    cancelRoomNavigation(navigation);
+    showError(err);
+  });
 }
 
 function joinCodeRoom() {
+  if (codeBusy.value) return;
   const code = normalizeCode(joinCode.value);
   if (!isValidCode(code)) {
     notice.value = "群聊码可用 4-32 位 A-Z 和 0-9。";
     return;
   }
-  requestCodeRoom("PUT", code).catch(showError);
+  const navigation = beginRoomNavigation();
+  requestCodeRoom("PUT", code, navigation).catch((err) => {
+    cancelRoomNavigation(navigation);
+    showError(err);
+  });
 }
 
-async function requestCodeRoom(method, code = "") {
+async function requestCodeRoom(method, code = "", navigation = null) {
   if (codeBusy.value) return;
   codeBusy.value = true;
   try {
@@ -734,7 +828,7 @@ async function requestCodeRoom(method, code = "") {
     }
     if (!response.ok) throw new Error(`群聊码请求失败：HTTP ${response.status}`);
     const payload = await response.json();
-    location.href = payload.url;
+    navigateToRoom(navigation, payload.url);
   } finally {
     codeBusy.value = false;
   }
@@ -1717,10 +1811,6 @@ async function receiveChunk(event) {
   if (complete.type === "private_msg") await receivePrivateMessage(complete);
 }
 
-function decodeWireBytes(value) {
-  return typeof value === "string" ? sodium.from_base64(value, sodium.base64_variants.ORIGINAL) : asBytes(value);
-}
-
 function rotationRoster() {
   return [deviceId.value, ...peers.value.keys()].filter(Boolean).sort();
 }
@@ -1825,41 +1915,6 @@ function activateEpoch(epoch, key) {
   }, 120000);
 }
 
-function normalizeWireEvent(event) {
-  const normalized = { ...event, protocol: Number(event.protocol || 0) };
-  for (const field of binaryEventFields) {
-    if (normalized[field] != null && normalized[field] !== "") normalized[field] = decodeWireBytes(normalized[field]);
-  }
-  return normalized;
-}
-
-function toWireEvent(event, mode) {
-  const wire = { ...event, protocol: 3 };
-  for (const field of binaryEventFields) {
-    if (wire[field] == null) continue;
-    const bytes = asBytes(wire[field]);
-    wire[field] = mode === "sse" ? b64(bytes) : bytes;
-  }
-  return wire;
-}
-
-function canonicalEventBytes(event) {
-  const bytes = (name) => event[name] ? asBytes(event[name]) : new Uint8Array();
-  return encode([
-    3, event.type || "", event.room || "", event.from || "", event.to || "",
-    event.msg_id || "", event.ack_id || "", event.transfer_id || "",
-    Number(event.seq || 0), Number(event.total || 0), Number(event.epoch || 0), Number(event.next_epoch || 0),
-    event.sender_key_id || "", event.recipient_key_id || "", event.rotation_id || "",
-    bytes("nonce"), bytes("ciphertext"), bytes("roster_hash"), bytes("sealed_key"),
-    bytes("public_key"), bytes("sign_public_key"), event.display_name || "",
-    bytes("hello_mac"),
-  ]);
-}
-
-function canonicalMessageAAD(event) {
-  return encode([3, event.type || "", event.room || "", event.from || "", event.to || "", event.msg_id || "", Number(event.epoch || 0), event.sender_key_id || "", event.recipient_key_id || "", event.nonce ? asBytes(event.nonce) : new Uint8Array()]);
-}
-
 function requiresPeerSignature(type) {
   return ["group_msg", "private_msg", "recipient_ack", "chunk", "purge_self", "leave_room", "key_prepare", "key_offer", "key_ready", "key_commit", "key_abort", "join_key_offer", "join_key_ready", "device_key_update"].includes(type);
 }
@@ -1896,13 +1951,6 @@ async function sendSignedEvent(event, activeTransport = transport.value) {
   complete.signature = sodium.crypto_sign_detached(canonicalEventBytes(complete), signingKeyPair.value.privateKey);
   await sendEvent(complete, activeTransport);
   return complete;
-}
-
-function asBytes(value) {
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (Array.isArray(value)) return new Uint8Array(value);
-  return new Uint8Array(value || []);
 }
 
 function concatBytes(chunks) {
@@ -2171,7 +2219,8 @@ function hashString(value) {
 }
 
 async function copyInvite() {
-  await navigator.clipboard.writeText(location.href);
+  const relativeInvite = `${location.pathname.replace(/^\/+/, "")}${location.hash}`;
+  await navigator.clipboard.writeText(relativeInvite);
   addSystemMessage("已复制邀请链接");
 }
 
@@ -2234,6 +2283,14 @@ function readInitialDarkMode() {
   const saved = localStorage.getItem("e2ee-chat-theme");
   if (saved) return saved === "dark";
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches || false;
+}
+
+function readInitialPopupMode() {
+  if (typeof window === "undefined") return true;
+  const saved = localStorage.getItem("e2ee-chat-popup-mode");
+  if (saved === "0") return false;
+  if (saved === "1") return true;
+  return true;
 }
 
 function applyTheme(enabled) {
