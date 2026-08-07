@@ -1,6 +1,6 @@
 import { encode } from "@msgpack/msgpack";
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const BINARY_EVENT_FIELDS = [
   "public_key",
   "sign_public_key",
@@ -12,26 +12,49 @@ export const BINARY_EVENT_FIELDS = [
   "sealed_key",
 ];
 
+const BINARY_FIELD_LIMITS = {
+  public_key: 64,
+  sign_public_key: 64,
+  hello_mac: 64,
+  signature: 128,
+  nonce: 64,
+  ciphertext: 50 * 1024 * 1024,
+  roster_hash: 64,
+  sealed_key: 256,
+};
+
 export function asBytes(value) {
+  if (value == null) return new Uint8Array();
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
   if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  if (Array.isArray(value)) return new Uint8Array(value);
-  return new Uint8Array(value || []);
+  if (Array.isArray(value)) {
+    if (!value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
+      throw new TypeError("Invalid byte array");
+    }
+    return new Uint8Array(value);
+  }
+  throw new TypeError("Invalid byte value");
 }
 
 export function createProtocolV3(sodium) {
-  const decodeWireBytes = (value) => (
-    typeof value === "string"
+  const decodeWireBytes = (value, field = "") => {
+    const bytes = typeof value === "string"
       ? sodium.from_base64(value, sodium.base64_variants.ORIGINAL)
-      : asBytes(value)
-  );
+      : asBytes(value);
+    const limit = BINARY_FIELD_LIMITS[field];
+    if (limit && bytes.byteLength > limit) throw new RangeError(`Invalid ${field} length`);
+    return bytes;
+  };
 
   const normalizeWireEvent = (event) => {
-    const normalized = { ...event, protocol: Number(event.protocol || 0) };
+    if (!event || typeof event !== "object" || Array.isArray(event)) throw new TypeError("Invalid event");
+    const protocol = Number(event.protocol || 0);
+    if (protocol !== PROTOCOL_VERSION) throw new Error("Unsupported protocol");
+    const normalized = { ...event, protocol };
     for (const field of BINARY_EVENT_FIELDS) {
       if (normalized[field] != null && normalized[field] !== "") {
-        normalized[field] = decodeWireBytes(normalized[field]);
+        normalized[field] = decodeWireBytes(normalized[field], field);
       }
     }
     return normalized;
@@ -42,6 +65,8 @@ export function createProtocolV3(sodium) {
     for (const field of BINARY_EVENT_FIELDS) {
       if (wire[field] == null) continue;
       const bytes = asBytes(wire[field]);
+      const limit = BINARY_FIELD_LIMITS[field];
+      if (limit && bytes.byteLength > limit) throw new RangeError(`Invalid ${field} length`);
       wire[field] = mode === "sse"
         ? sodium.to_base64(bytes, sodium.base64_variants.ORIGINAL)
         : bytes;
@@ -60,6 +85,7 @@ export function createProtocolV3(sodium) {
       event.msg_id || "",
       event.ack_id || "",
       event.transfer_id || "",
+      event.message_type || "",
       Number(event.seq || 0),
       Number(event.total || 0),
       Number(event.epoch || 0),
@@ -67,6 +93,7 @@ export function createProtocolV3(sodium) {
       event.sender_key_id || "",
       event.recipient_key_id || "",
       event.rotation_id || "",
+      Number(event.key_generation || 0),
       bytes("nonce"),
       bytes("ciphertext"),
       bytes("roster_hash"),
