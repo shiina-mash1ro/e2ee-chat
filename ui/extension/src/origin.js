@@ -1,6 +1,6 @@
 export const EXTENSION_INFO_PATH = "/api/extension-info";
 export const EXTENSION_API_VERSION = 1;
-export const CHAT_PROTOCOL_VERSION = 3;
+export const CHAT_PROTOCOL_VERSION = 4;
 
 export function normalizeChatOrigin(value) {
   const url = new URL(String(value || "").trim());

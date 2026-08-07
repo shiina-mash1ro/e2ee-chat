@@ -60,6 +60,26 @@ func TestExtensionCORSRequiresExactConfiguredOrigin(t *testing.T) {
 	}
 }
 
+func TestWebSocketOriginRequiresSameSiteOrConfiguredExtension(t *testing.T) {
+	for _, test := range []struct {
+		origin     string
+		configured string
+		want       bool
+	}{
+		{"https://chat.example", "", true},
+		{"https://evil.example", "", false},
+		{"chrome-extension://abcdefghijklmnop", "chrome-extension://abcdefghijklmnop", true},
+		{"chrome-extension://other", "chrome-extension://abcdefghijklmnop", false},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "https://chat.example/api/rooms/testroom/ws", nil)
+		req.Host = "chat.example"
+		req.Header.Set("Origin", test.origin)
+		if got := webSocketOriginAllowed(req, test.configured); got != test.want {
+			t.Fatalf("origin %q allowed = %v, want %v", test.origin, got, test.want)
+		}
+	}
+}
+
 func TestExtensionInfoIdentifiesCompatibleService(t *testing.T) {
 	handler := securityHeaders(http.HandlerFunc(extensionInfoHandler))
 	req := httptest.NewRequest(http.MethodGet, "/api/extension-info", nil)
@@ -84,7 +104,7 @@ func TestExtensionInfoIdentifiesCompatibleService(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.App != "e2ee-chat" || info.ExtensionAPI != 1 || info.Protocol != 3 || info.Build == "" {
+	if info.App != "e2ee-chat" || info.ExtensionAPI != 1 || info.Protocol != protocolVersion || info.Build == "" {
 		t.Fatalf("unexpected extension info: %+v", info)
 	}
 
@@ -169,6 +189,7 @@ func TestCodeRoomRateLimitUsesForwardedForFromTrustedProxy(t *testing.T) {
 
 func TestJoinCodeRoomRateLimited(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "123456")
 	h.powDifficulty = 8
 	for i := 0; i < codeLimit; i++ {
 		req := httptest.NewRequest(http.MethodPut, "/api/code-room", strings.NewReader(`{"code":"123456","pow":`+mustProofJSON(t, h, "203.0.113.20")+`}`))
@@ -191,6 +212,7 @@ func TestJoinCodeRoomRateLimited(t *testing.T) {
 
 func TestJoinCodeRoomAcceptsCustomCode(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "TEAMR29")
 	h.powDifficulty = 8
 	req := httptest.NewRequest(http.MethodPut, "/api/code-room", strings.NewReader(`{"code":"team-r29","pow":`+mustProofJSON(t, h, "203.0.113.30")+`}`))
 	req.RemoteAddr = "203.0.113.30:12345"
@@ -206,6 +228,7 @@ func TestJoinCodeRoomAcceptsCustomCode(t *testing.T) {
 
 func TestJoinCodeRoomAcceptsPreviouslyAmbiguousCode(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "ROOM01IL")
 	h.powDifficulty = 8
 	req := httptest.NewRequest(http.MethodPut, "/api/code-room", strings.NewReader(`{"code":"room-01-il","pow":`+mustProofJSON(t, h, "203.0.113.31")+`}`))
 	req.RemoteAddr = "203.0.113.31:12345"
@@ -234,6 +257,7 @@ func TestWSRejectsInvalidClient(t *testing.T) {
 
 func TestWSInvalidMessagePackReturnsServerError(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	server := httptest.NewServer(http.HandlerFunc(h.apiHandler))
 	defer server.Close()
 
@@ -251,6 +275,7 @@ func TestWSInvalidMessagePackReturnsServerError(t *testing.T) {
 
 func TestWSServerAckAndBroadcast(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	server := httptest.NewServer(http.HandlerFunc(h.apiHandler))
 	defer server.Close()
 
@@ -264,12 +289,15 @@ func TestWSServerAckAndBroadcast(t *testing.T) {
 	readWSEvent(t, ctx, receiver, "welcome")
 
 	outbound := wsEnvelope{
-		Type:      "group_msg",
-		Room:      "testroom",
-		From:      "client_sender1",
-		Protocol:  3,
-		MsgID:     "msg_1",
-		Signature: make([]byte, 64),
+		Type:       "group_msg",
+		Room:       "testroom",
+		From:       "client_sender1",
+		Protocol:   protocolVersion,
+		EventID:    "evt_0123456789abcdef",
+		MsgID:      "msg_1",
+		Signature:  make([]byte, 64),
+		Nonce:      make([]byte, 24),
+		Ciphertext: []byte{1},
 	}
 	body, err := msgpack.Marshal(outbound)
 	if err != nil {
@@ -291,6 +319,7 @@ func TestWSServerAckAndBroadcast(t *testing.T) {
 
 func TestWSPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	server := httptest.NewServer(http.HandlerFunc(h.apiHandler))
 	defer server.Close()
 
@@ -307,13 +336,18 @@ func TestWSPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 	readWSEvent(t, ctx, bystander, "welcome")
 
 	outbound := wsEnvelope{
-		Type:      "private_msg",
-		Room:      "testroom",
-		From:      "client_sender1",
-		To:        "client_receiver",
-		Protocol:  3,
-		MsgID:     "msg_private",
-		Signature: make([]byte, 64),
+		Type:           "private_msg",
+		Room:           "testroom",
+		From:           "client_sender1",
+		To:             "client_receiver",
+		Protocol:       protocolVersion,
+		EventID:        "evt_0123456789abcdef",
+		MsgID:          "msg_private",
+		Signature:      make([]byte, 64),
+		Nonce:          make([]byte, 24),
+		Ciphertext:     []byte{1},
+		PublicKey:      make([]byte, 32),
+		RecipientKeyID: "recipient_key",
 	}
 	body, err := msgpack.Marshal(outbound)
 	if err != nil {
@@ -336,6 +370,7 @@ func TestWSPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 
 func TestSSEPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	sender := &Client{id: "client_sender1", events: make(chan []byte, 1)}
 	receiver := &Client{id: "client_receiver", events: make(chan []byte, 1)}
 	bystander := &Client{id: "client_bystand", events: make(chan []byte, 1)}
@@ -357,6 +392,7 @@ func TestSSEPrivateMessageTargetsOnlySenderAndRecipient(t *testing.T) {
 
 func TestExplicitPurgeBroadcastsWithoutDisconnecting(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	sender := &Client{id: "client_sender1", token: "token_sender123", events: make(chan []byte, 2)}
 	receiver := &Client{id: "client_receiver", events: make(chan []byte, 2)}
 	if err := h.addClient("testroom", sender); err != nil {
@@ -381,6 +417,7 @@ func TestExplicitPurgeBroadcastsWithoutDisconnecting(t *testing.T) {
 
 func TestExplicitLeavePurgesAndDisconnects(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	sender := &Client{id: "client_sender1", token: "token_sender123", events: make(chan []byte, 2)}
 	receiver := &Client{id: "client_receiver", events: make(chan []byte, 3)}
 	if err := h.addClient("testroom", sender); err != nil {
@@ -402,6 +439,7 @@ func TestExplicitLeavePurgesAndDisconnects(t *testing.T) {
 
 func TestDisconnectGraceReconnectCancelsPurge(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	h.leaveGrace = 25 * time.Millisecond
 	old := &Client{id: "client_sender1", events: make(chan []byte, 1)}
 	receiver := &Client{id: "client_receiver", events: make(chan []byte, 1)}
@@ -427,6 +465,7 @@ func TestDisconnectGraceReconnectCancelsPurge(t *testing.T) {
 
 func TestDisconnectGracePurgesAfterTimeout(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	h.leaveGrace = 10 * time.Millisecond
 	sender := &Client{id: "client_sender1", events: make(chan []byte, 1)}
 	receiver := &Client{id: "client_receiver", events: make(chan []byte, 1)}
@@ -452,6 +491,7 @@ func TestDisconnectGracePurgesAfterTimeout(t *testing.T) {
 
 func TestOldConnectionCannotRemoveReplacement(t *testing.T) {
 	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
 	old := &Client{id: "client_sender1", events: make(chan []byte, 1)}
 	replacement := &Client{id: old.id, events: make(chan []byte, 1)}
 	if err := h.addClient("testroom", old); err != nil {
@@ -524,6 +564,59 @@ func TestRoomConfigHandler(t *testing.T) {
 	h.mu.RUnlock()
 	if got != 6 {
 		t.Fatalf("configured max clients = %d, want 6", got)
+	}
+}
+
+func TestRoomExpiresAtFixedLifetime(t *testing.T) {
+	h := newHub()
+	h.roomLifetime = 20 * time.Millisecond
+	mustConfigureRoom(t, h, "shortlived")
+	client := &Client{id: "client_sender1", events: make(chan []byte, 1)}
+	if err := h.addClient("shortlived", client); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case body, ok := <-client.events:
+		if !ok {
+			t.Fatal("room expired without final room_expired event")
+		}
+		var event inboundEvent
+		if err := json.Unmarshal(body, &event); err != nil || event.Type != "room_expired" {
+			t.Fatalf("expiry event = %s, error = %v", body, err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("room did not expire")
+	}
+	if _, ok := <-client.events; ok {
+		t.Fatal("expired room client channel remained open")
+	}
+	if h.roomActive("shortlived") {
+		t.Fatal("expired room remained joinable")
+	}
+}
+
+func TestSSEMessagesRequireBoundConnectionToken(t *testing.T) {
+	h := newHub()
+	mustConfigureRoom(t, h, "testroom")
+	client := &Client{id: "client_sender1", token: "conn_sender_token", events: make(chan []byte, 1)}
+	if err := h.addClient("testroom", client); err != nil {
+		t.Fatal(err)
+	}
+	event := inboundEvent{
+		Type: "group_msg", Room: "testroom", From: client.id, Protocol: protocolVersion,
+		EventID: "evt_0123456789abcdef", MsgID: "msg_1", Signature: base64.StdEncoding.EncodeToString(make([]byte, 64)),
+		Nonce: base64.StdEncoding.EncodeToString(make([]byte, 24)), Ciphertext: base64.StdEncoding.EncodeToString([]byte{1}),
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/rooms/testroom/messages", bytes.NewReader(body))
+	req.Header.Set("X-Connection-Token", "conn_wrong_token")
+	rec := httptest.NewRecorder()
+	h.messagesHandler(rec, req, "testroom")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("mismatched SSE identity status = %d, want 401", rec.Code)
 	}
 }
 
@@ -634,15 +727,22 @@ func wsURL(serverURL, path string) string {
 	return "ws" + strings.TrimPrefix(serverURL, "http") + path
 }
 
+func mustConfigureRoom(t *testing.T, h *Hub, roomID string) {
+	t.Helper()
+	if err := h.configureRoom(roomID, defaultRoomClients); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWSRejectsInvalidEventType(t *testing.T) {
-	err := validateWSEvent(wsEnvelope{Type: "bad", Room: "testroom", From: "client_sender1", Protocol: 3}, "testroom", "client_sender1")
+	err := validateWSEvent(wsEnvelope{Type: "bad", Room: "testroom", From: "client_sender1", Protocol: protocolVersion}, "testroom", "client_sender1")
 	if err == nil {
 		t.Fatal("invalid ws event type accepted")
 	}
 }
 
 func TestWSRejectsRoomMismatch(t *testing.T) {
-	err := validateWSEvent(wsEnvelope{Type: "hello", Room: "other", From: "client_sender1", Protocol: 3}, "testroom", "client_sender1")
+	err := validateWSEvent(wsEnvelope{Type: "hello", Room: "other", From: "client_sender1", Protocol: protocolVersion}, "testroom", "client_sender1")
 	if err == nil {
 		t.Fatal("room mismatch accepted")
 	}
@@ -656,7 +756,7 @@ func TestWSRejectsLegacyProtocol(t *testing.T) {
 }
 
 func TestSSERequiresBase64BinaryFields(t *testing.T) {
-	event := inboundEvent{Type: "hello", Room: "testroom", From: "client_sender1", Protocol: 3, SenderKeyID: "key_1", PublicKey: "not-base64", SignPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), HelloMAC: base64.StdEncoding.EncodeToString(make([]byte, 32)), Signature: base64.StdEncoding.EncodeToString(make([]byte, 64))}
+	event := inboundEvent{Type: "hello", Room: "testroom", From: "client_sender1", Protocol: protocolVersion, EventID: "evt_0123456789abcdef", SenderKeyID: "key_1", PublicKey: "not-base64", SignPublicKey: base64.StdEncoding.EncodeToString(make([]byte, 32)), HelloMAC: base64.StdEncoding.EncodeToString(make([]byte, 32)), Signature: base64.StdEncoding.EncodeToString(make([]byte, 64))}
 	if err := validateSSEEvent(event); err == nil {
 		t.Fatal("invalid SSE base64 accepted")
 	}
@@ -664,7 +764,7 @@ func TestSSERequiresBase64BinaryFields(t *testing.T) {
 
 func TestTransportConversionPreservesBinaryBytes(t *testing.T) {
 	want := []byte{0, 1, 2, 253, 254, 255}
-	event := inboundEvent{Type: "group_msg", Room: "testroom", From: "client_sender1", Protocol: 3, MsgID: "msg_1", Signature: base64.StdEncoding.EncodeToString(make([]byte, 64)), Ciphertext: base64.StdEncoding.EncodeToString(want)}
+	event := inboundEvent{Type: "group_msg", Room: "testroom", From: "client_sender1", Protocol: protocolVersion, EventID: "evt_0123456789abcdef", MsgID: "msg_1", Signature: base64.StdEncoding.EncodeToString(make([]byte, 64)), Ciphertext: base64.StdEncoding.EncodeToString(want)}
 	wsEvent, err := event.toWS()
 	if err != nil {
 		t.Fatal(err)
@@ -682,5 +782,16 @@ func TestTransportConversionPreservesBinaryBytes(t *testing.T) {
 	}
 	if _, ok := decoded["ciphertext"].([]byte); !ok {
 		t.Fatalf("websocket ciphertext encoded as %T, want MessagePack binary", decoded["ciphertext"])
+	}
+}
+
+func TestWSRejectsOversizedChunkPlan(t *testing.T) {
+	event := wsEnvelope{
+		Type: "chunk", Room: "testroom", From: "client_sender1", Protocol: protocolVersion,
+		EventID: "evt_0123456789abcdef", MsgID: "msg_1:0", TransferID: "msg_1", MessageType: "group_msg",
+		Total: maxChunkCount + 1, Signature: make([]byte, 64), Nonce: make([]byte, 24), Ciphertext: []byte{1},
+	}
+	if err := validateWSEvent(event, "testroom", "client_sender1"); err == nil {
+		t.Fatal("oversized chunk plan accepted")
 	}
 }

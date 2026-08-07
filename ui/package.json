@@ -11,6 +11,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "smoke": "node scripts/smoke-chat.mjs",
     "smoke:extension": "node scripts/smoke-extension.mjs",
+    "test:protocol": "node scripts/test-protocol-v4.mjs",
     "test:extension": "node --test scripts/test-extension-helpers.mjs"
   },
   "dependencies": {

@@ -17,7 +17,7 @@ test("normalizes only supported service origins", () => {
 });
 
 test("requires an exact compatible service identity", () => {
-  const valid = { app: "e2ee-chat", extensionApi: 1, protocol: 3, build: "test" };
+  const valid = { app: "e2ee-chat", extensionApi: 1, protocol: 4, build: "test" };
   assert.equal(assertExtensionInfo(valid), valid);
   for (const invalid of [
     { ...valid, app: "other" },
@@ -32,7 +32,7 @@ test("validates the identity endpoint without caching", async () => {
   let request;
   globalThis.fetch = async (url, options) => {
     request = { url, options };
-    return new Response(JSON.stringify({ app: "e2ee-chat", extensionApi: 1, protocol: 3, build: "test-build" }), {
+    return new Response(JSON.stringify({ app: "e2ee-chat", extensionApi: 1, protocol: 4, build: "test-build" }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
