@@ -49,9 +49,11 @@ export function createProtocolV3(sodium) {
 
   const normalizeWireEvent = (event) => {
     if (!event || typeof event !== "object" || Array.isArray(event)) throw new TypeError("Invalid event");
-    const protocol = Number(event.protocol || 0);
-    if (protocol !== PROTOCOL_VERSION) throw new Error("Unsupported protocol");
-    const normalized = { ...event, protocol };
+    const wireProtocol = Number(event.protocol || 0);
+    if (wireProtocol !== PROTOCOL_VERSION) throw new Error("Unsupported protocol");
+    // The current application code uses 3 as its internal payload codec selector.
+    // Keep that implementation detail local while the wire protocol is v4.
+    const normalized = { ...event, protocol: 3 };
     for (const field of BINARY_EVENT_FIELDS) {
       if (normalized[field] != null && normalized[field] !== "") {
         normalized[field] = decodeWireBytes(normalized[field], field);
