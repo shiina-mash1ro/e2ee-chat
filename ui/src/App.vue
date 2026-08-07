@@ -537,6 +537,12 @@ const boxKeyHistory = new Map();
 const pendingEpochKeys = new Map();
 const seenAuthenticatedEvents = new Set();
 const peerIdentityPins = new Map();
+const pendingAuthenticatedPeerEvents = new Map();
+const pendingAuthenticatedPeerEventIds = new Set();
+const maxPendingAuthenticatedPeerEvents = 128;
+const maxPendingAuthenticatedPeerEventsPerPeer = 32;
+const pendingAuthenticatedPeerEventTtlMs = 15000;
+let pendingAuthenticatedPeerEventCount = 0;
 let currentEpoch = 0;
 let epochMessageCount = 0;
 let epochStartedAt = 0;
@@ -636,6 +642,7 @@ onBeforeUnmount(() => {
   revokeFileObjectUrls();
   if (rotationTimer) clearInterval(rotationTimer);
   if (messageRetentionTimer) clearInterval(messageRetentionTimer);
+  clearPendingAuthenticatedPeerEvents();
   window.removeEventListener("online", wakeWSRecovery);
   document.removeEventListener("visibilitychange", handleVisibilityRecovery);
   document.removeEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
@@ -1275,13 +1282,19 @@ async function handleWireEvent(event) {
   if (event.type === "hello" || event.type === "peer_hello") {
     if (!verifyHelloEvent(event)) return;
   } else if (requiresPeerSignature(event.type)) {
-    if (!verifyPeerEvent(event)) return;
+    const verification = verifyPeerEvent(event);
+    if (verification === "pending") {
+      queuePendingAuthenticatedPeerEvent(event);
+      return;
+    }
+    if (!verification) return;
   }
 
   switch (event.type) {
     case "hello":
       if (event.from === deviceId.value) return;
       if (!rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation)) return;
+      await flushPendingAuthenticatedPeerEvents(event.from);
       await sendSignedEvent({
         type: "peer_hello",
         room: roomId.value,
@@ -1297,7 +1310,9 @@ async function handleWireEvent(event) {
       break;
     case "peer_hello":
       if (event.to !== deviceId.value || event.from === deviceId.value) return;
-      rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation);
+      if (rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation)) {
+        await flushPendingAuthenticatedPeerEvents(event.from);
+      }
       break;
     case "peer_leave":
       forgetPeer(event.from);
@@ -1362,6 +1377,7 @@ function forgetPeer(id) {
   const next = new Map(peers.value);
   next.delete(id);
   peers.value = next;
+  clearPendingAuthenticatedPeerEvents(id);
   if (known && activeRotation) abortRotation(activeRotation.id).catch(showError);
   if (selectedPeer.value === id) {
     const offline = new Map(offlinePrivatePeers.value);
@@ -1787,6 +1803,7 @@ function expireLocalRoom() {
   boxKeyHistory.clear();
   peerIdentityPins.clear();
   seenAuthenticatedEvents.clear();
+  clearPendingAuthenticatedPeerEvents();
   if (identityStorageKey) sessionStorage.removeItem(identityStorageKey);
   sessionStorage.removeItem(`e2ee-chat-device:${roomId.value}`);
   location.replace("/");
@@ -2060,7 +2077,9 @@ async function handleKeyEvent(event) {
     activeRotation = null;
     return;
   }
-  if (event.type === "device_key_update") applyDeviceKeyUpdate(event);
+  if (event.type === "device_key_update" && applyDeviceKeyUpdate(event)) {
+    await flushPendingAuthenticatedPeerEvents(event.from);
+  }
 }
 
 async function commitRotation() {
@@ -2132,14 +2151,71 @@ function verifyHelloEvent(event) {
 }
 
 function verifyPeerEvent(event) {
+  const pinnedPeer = peers.value.get(event.from) || peerIdentityPins.get(event.from);
   const peer = signingIdentityForEvent(event, {
     ownDeviceId: deviceId.value,
     ownSignPublicKey: signingKeyPair.value?.publicKey,
     ownKeyGeneration: keyGeneration,
-    peer: peers.value.get(event.from) || peerIdentityPins.get(event.from),
+    peer: pinnedPeer,
   });
-  if (!peer || !sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey)) return false;
+  if (!peer) {
+    const generation = Number(event.key_generation);
+    if (event.protocol !== PROTOCOL_VERSION || !pinnedPeer?.signPublicKey || !event.signature || !event.event_id ||
+        !Number.isInteger(generation) || generation <= Number(pinnedPeer.keyGeneration || 0) ||
+        !sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), pinnedPeer.signPublicKey)) {
+      return false;
+    }
+    return "pending";
+  }
+  if (!sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey)) return false;
   return rememberAuthenticatedEvent(event);
+}
+
+function queuePendingAuthenticatedPeerEvent(event) {
+  const replayId = authenticatedEventReplayKey(event);
+  if (!replayId || seenAuthenticatedEvents.has(replayId) || pendingAuthenticatedPeerEventIds.has(replayId)) return;
+  prunePendingAuthenticatedPeerEvents();
+  const pending = pendingAuthenticatedPeerEvents.get(event.from) || [];
+  if (pending.length >= maxPendingAuthenticatedPeerEventsPerPeer || pendingAuthenticatedPeerEventCount >= maxPendingAuthenticatedPeerEvents) return;
+  pending.push({ event, replayId, receivedAt: Date.now() });
+  pendingAuthenticatedPeerEvents.set(event.from, pending);
+  pendingAuthenticatedPeerEventIds.add(replayId);
+  pendingAuthenticatedPeerEventCount += 1;
+}
+
+async function flushPendingAuthenticatedPeerEvents(peerId) {
+  const pending = pendingAuthenticatedPeerEvents.get(peerId) || [];
+  pendingAuthenticatedPeerEvents.delete(peerId);
+  for (const item of pending) {
+    pendingAuthenticatedPeerEventIds.delete(item.replayId);
+    pendingAuthenticatedPeerEventCount -= 1;
+    if (Date.now() - item.receivedAt <= pendingAuthenticatedPeerEventTtlMs) await handleWireEvent(item.event);
+  }
+}
+
+function prunePendingAuthenticatedPeerEvents(now = Date.now()) {
+  for (const [peerId, pending] of pendingAuthenticatedPeerEvents) {
+    const retained = pending.filter((item) => {
+      if (now - item.receivedAt <= pendingAuthenticatedPeerEventTtlMs) return true;
+      pendingAuthenticatedPeerEventIds.delete(item.replayId);
+      pendingAuthenticatedPeerEventCount -= 1;
+      return false;
+    });
+    if (retained.length) pendingAuthenticatedPeerEvents.set(peerId, retained);
+    else pendingAuthenticatedPeerEvents.delete(peerId);
+  }
+}
+
+function clearPendingAuthenticatedPeerEvents(peerId = "") {
+  const peerIds = peerId ? [peerId] : [...pendingAuthenticatedPeerEvents.keys()];
+  for (const id of peerIds) {
+    for (const item of pendingAuthenticatedPeerEvents.get(id) || []) {
+      pendingAuthenticatedPeerEventIds.delete(item.replayId);
+      pendingAuthenticatedPeerEventCount -= 1;
+    }
+    pendingAuthenticatedPeerEvents.delete(id);
+  }
+  if (!peerId) pendingAuthenticatedPeerEventCount = 0;
 }
 
 function rememberAuthenticatedEvent(event) {
