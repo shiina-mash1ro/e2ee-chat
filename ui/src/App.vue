@@ -441,7 +441,9 @@ import { decode, encode } from "@msgpack/msgpack";
 import sodium from "libsodium-wrappers";
 import { darkTheme } from "naive-ui";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { asBytes, createProtocolV3 } from "./protocol-v3.js";
+import { asBytes, createProtocolV4, PROTOCOL_VERSION } from "./protocol-v4.js";
+import { partitionRetainedMessages } from "./message-retention.js";
+import { authenticatedEventReplayKey, signingIdentityForEvent } from "./authenticated-events.js";
 
 const roomId = ref("");
 const roomSecret = ref(null);
@@ -499,6 +501,7 @@ let messageSeq = 0;
 let notificationSeq = 0;
 let sessionEpoch = 0;
 let connectionToken = "";
+let identityStorageKey = "";
 let activeSendOperations = 0;
 let pendingWSUpgrade = null;
 let imagePreviewPan = null;
@@ -513,6 +516,9 @@ const wsRetryDelaysMs = [5000, 10000, 20000, 40000, 80000, 120000];
 const textAckTimeoutMs = 5000;
 const chunkAckTimeoutMs = 15000;
 const chunkSize = 256 * 1024;
+const maxIncomingTransfers = 32;
+const maxChunkCount = 128;
+const maxEncryptedTransferBytes = maxFileBytes + 64 * 1024;
 const pendingMessages = new Map();
 const pendingServerAcks = new Map();
 const incomingTransfers = new Map();
@@ -525,16 +531,19 @@ const {
   decodeWireBytes,
   normalizeWireEvent,
   toWireEvent,
-} = createProtocolV3(sodium);
+} = createProtocolV4(sodium);
 const epochKeys = new Map();
 const boxKeyHistory = new Map();
 const pendingEpochKeys = new Map();
 const seenAuthenticatedEvents = new Set();
+const peerIdentityPins = new Map();
 let currentEpoch = 0;
 let epochMessageCount = 0;
 let epochStartedAt = 0;
 let rotationTimer = null;
 let activeRotation = null;
+let keyGeneration = 0;
+let messageRetentionTimer = null;
 const wsRecovery = {
   timer: null,
   probeTimeout: null,
@@ -626,6 +635,7 @@ onBeforeUnmount(() => {
   revokeSelectedFileUrl();
   revokeFileObjectUrls();
   if (rotationTimer) clearInterval(rotationTimer);
+  if (messageRetentionTimer) clearInterval(messageRetentionTimer);
   window.removeEventListener("online", wakeWSRecovery);
   document.removeEventListener("visibilitychange", handleVisibilityRecovery);
   document.removeEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
@@ -651,9 +661,9 @@ function boot() {
   roomKey.value = sodium.crypto_generichash(
     sodium.crypto_aead_xchacha20poly1305_ietf_KEYBYTES,
     secret,
-    sodium.from_string("e2ee-chat-room-encryption-v3"),
+    sodium.from_string("e2ee-chat-room-encryption-v4"),
   );
-  authKey.value = sodium.crypto_generichash(32, secret, sodium.from_string("e2ee-chat-room-auth-v3"));
+  authKey.value = sodium.crypto_generichash(32, secret, sodium.from_string("e2ee-chat-room-auth-v4"));
   currentEpoch = 0;
   epochKeys.clear();
   epochKeys.set(0, roomKey.value);
@@ -685,24 +695,97 @@ function startChatSession() {
   deviceId.value = validDeviceId(savedDeviceId) ? savedDeviceId : `dev_${base64Url(sodium.randombytes_buf(12))}`;
   sessionStorage.setItem(storageKey, deviceId.value);
   connectionToken = `conn_${base64Url(sodium.randombytes_buf(18))}`;
-  const identityKey = `e2ee-chat-identity-v3:${roomId.value}`;
+  identityStorageKey = `e2ee-chat-identity-v4:${roomId.value}`;
   let stored = null;
-  try { stored = JSON.parse(sessionStorage.getItem(identityKey) || "null"); } catch { stored = null; }
+  try { stored = JSON.parse(sessionStorage.getItem(identityStorageKey) || "null"); } catch { stored = null; }
   if (stored?.box_public && stored?.box_private && stored?.sign_public && stored?.sign_private) {
     keyPair.value = { publicKey: fromB64(stored.box_public), privateKey: fromB64(stored.box_private) };
     signingKeyPair.value = { publicKey: fromB64(stored.sign_public), privateKey: fromB64(stored.sign_private) };
   } else {
     keyPair.value = sodium.crypto_box_keypair();
     signingKeyPair.value = sodium.crypto_sign_keypair();
-    sessionStorage.setItem(identityKey, JSON.stringify({
-      box_public: b64(keyPair.value.publicKey), box_private: b64(keyPair.value.privateKey),
-      sign_public: b64(signingKeyPair.value.publicKey), sign_private: b64(signingKeyPair.value.privateKey),
-    }));
   }
   senderKeyId.value = base64Url(sodium.crypto_generichash(12, keyPair.value.publicKey));
+  keyGeneration = Math.max(0, Number(stored?.key_generation) || 0);
+  restoreCryptoSession(stored);
+  persistCryptoSession();
   rotationTimer = setInterval(() => maybeStartKeyRotation(), 30000);
+  messageRetentionTimer = setInterval(pruneMessages, 30000);
   getCryptoWorker();
   connectEvents();
+}
+
+function restoreCryptoSession(stored) {
+  if (!stored) return;
+  try {
+    const restoredEpochs = new Map();
+    for (const item of stored.epoch_keys || []) {
+      const epoch = Number(item?.epoch);
+      const key = fromB64(item?.key || "");
+      if (Number.isInteger(epoch) && epoch >= 0 && key.length === 32) restoredEpochs.set(epoch, key);
+    }
+    const restoredCurrentEpoch = Math.max(0, Number(stored.current_epoch) || 0);
+    if (restoredEpochs.has(restoredCurrentEpoch)) {
+      epochKeys.clear();
+      for (const [epoch, key] of restoredEpochs) epochKeys.set(epoch, key);
+      currentEpoch = restoredCurrentEpoch;
+      roomKey.value = epochKeys.get(currentEpoch);
+      epochStartedAt = Math.max(Date.now() - 15 * 60 * 1000, Number(stored.epoch_started_at) || Date.now());
+    }
+    boxKeyHistory.clear();
+    for (const item of stored.box_history || []) {
+      const publicKey = fromB64(item?.public_key || "");
+      const privateKey = fromB64(item?.private_key || "");
+      if (item?.key_id && publicKey.length === 32 && privateKey.length === 32) {
+        boxKeyHistory.set(item.key_id, { publicKey, privateKey });
+      }
+    }
+    peerIdentityPins.clear();
+    for (const item of stored.peer_pins || []) {
+      const signPublicKey = fromB64(item?.sign_public_key || "");
+      const publicKey = fromB64(item?.public_key || "");
+      if (validDeviceId(item?.id) && signPublicKey.length === 32 && publicKey.length === 32) {
+        peerIdentityPins.set(item.id, {
+          signPublicKey,
+          publicKey,
+          keyId: String(item.key_id || ""),
+          keyGeneration: Math.max(0, Number(item.key_generation) || 0),
+        });
+      }
+    }
+  } catch {
+    epochKeys.clear();
+    epochKeys.set(0, roomKey.value);
+    currentEpoch = 0;
+    boxKeyHistory.clear();
+    peerIdentityPins.clear();
+  }
+}
+
+function persistCryptoSession() {
+  if (!identityStorageKey || !keyPair.value || !signingKeyPair.value) return;
+  sessionStorage.setItem(identityStorageKey, JSON.stringify({
+    box_public: b64(keyPair.value.publicKey),
+    box_private: b64(keyPair.value.privateKey),
+    sign_public: b64(signingKeyPair.value.publicKey),
+    sign_private: b64(signingKeyPair.value.privateKey),
+    key_generation: keyGeneration,
+    current_epoch: currentEpoch,
+    epoch_started_at: epochStartedAt,
+    epoch_keys: [...epochKeys.entries()].map(([epoch, key]) => ({ epoch, key: b64(key) })),
+    box_history: [...boxKeyHistory.entries()].map(([keyId, pair]) => ({
+      key_id: keyId,
+      public_key: b64(pair.publicKey),
+      private_key: b64(pair.privateKey),
+    })),
+    peer_pins: [...peerIdentityPins.entries()].map(([id, pin]) => ({
+      id,
+      sign_public_key: b64(pin.signPublicKey),
+      public_key: b64(pin.publicKey),
+      key_id: pin.keyId,
+      key_generation: pin.keyGeneration,
+    })),
+  }));
 }
 
 function beginRoomNavigation() {
@@ -1172,8 +1255,10 @@ async function sendHello() {
     type: "hello",
     room: roomId.value,
     from: deviceId.value,
-    protocol: 3,
-    features: ["v3", "epoch_rotation", "binary_ws"],
+    protocol: PROTOCOL_VERSION,
+    features: ["v4", "epoch_rotation", "binary_ws"],
+    event_id: nextEventId(),
+    key_generation: keyGeneration,
     public_key: keyPair.value.publicKey,
     sign_public_key: signingKeyPair.value.publicKey,
     sender_key_id: senderKeyId.value,
@@ -1196,13 +1281,13 @@ async function handleWireEvent(event) {
   switch (event.type) {
     case "hello":
       if (event.from === deviceId.value) return;
-      rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id);
+      if (!rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation)) return;
       await sendSignedEvent({
         type: "peer_hello",
         room: roomId.value,
         from: deviceId.value,
         to: event.from,
-        protocol: 3,
+        protocol: PROTOCOL_VERSION,
         public_key: keyPair.value.publicKey,
         sign_public_key: signingKeyPair.value.publicKey,
         sender_key_id: senderKeyId.value,
@@ -1212,13 +1297,16 @@ async function handleWireEvent(event) {
       break;
     case "peer_hello":
       if (event.to !== deviceId.value || event.from === deviceId.value) return;
-      rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id);
+      rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation);
       break;
     case "peer_leave":
       forgetPeer(event.from);
       break;
     case "peer_purge":
       purgeMessagesFrom(event.from);
+      break;
+    case "room_expired":
+      expireLocalRoom();
       break;
     case "server_ack":
     case "chunk_ack":
@@ -1243,18 +1331,30 @@ async function handleWireEvent(event) {
   }
 }
 
-function rememberPeer(id, publicKeyText, nameText = "", signPublicKeyText = null, keyId = "") {
-  if (!validDeviceId(id) || !publicKeyText) return;
+function rememberPeer(id, publicKeyText, nameText = "", signPublicKeyText = null, keyId = "", generation = 0) {
+  if (!validDeviceId(id) || !publicKeyText) return false;
   const publicKey = typeof publicKeyText === "string" ? sodium.from_base64(publicKeyText, sodium.base64_variants.ORIGINAL) : asBytes(publicKeyText);
   const next = new Map(peers.value);
-  const signPublicKey = signPublicKeyText ? decodeWireBytes(signPublicKeyText) : next.get(id)?.signPublicKey;
-  const old = next.get(id);
-  if (old?.signPublicKey && signPublicKey && !sodium.memcmp(old.signPublicKey, signPublicKey)) return;
-  next.set(id, { ...old, publicKey, signPublicKey, keyId, name: cleanName(nameText), lastSeen: Date.now(), ready: currentEpoch === 0 });
+  const wasOnline = next.has(id);
+  const pin = peerIdentityPins.get(id);
+  const old = next.get(id) || pin;
+  const signPublicKey = signPublicKeyText ? decodeWireBytes(signPublicKeyText) : old?.signPublicKey;
+  const keyGenerationValue = Math.max(0, Number(generation) || 0);
+  if (publicKey.length !== 32 || signPublicKey?.length !== 32 || keyId !== keyIdFor(publicKey)) return false;
+  if (old?.signPublicKey && !sodium.memcmp(old.signPublicKey, signPublicKey)) return false;
+  if (old && keyGenerationValue < Number(old.keyGeneration || 0)) return false;
+  if (old && keyGenerationValue === Number(old.keyGeneration || 0) &&
+      (!sodium.memcmp(old.publicKey, publicKey) || old.keyId !== keyId)) return false;
+  const peer = { ...old, publicKey, signPublicKey, keyId, keyGeneration: keyGenerationValue, name: cleanName(nameText), lastSeen: Date.now(), ready: currentEpoch === 0 };
+  next.set(id, peer);
   peers.value = next;
+  if (!wasOnline && activeRotation) abortRotation(activeRotation.id).catch(showError);
+  peerIdentityPins.set(id, { publicKey, signPublicKey, keyId, keyGeneration: keyGenerationValue });
+  persistCryptoSession();
   const offline = new Map(offlinePrivatePeers.value);
   offline.delete(id);
   offlinePrivatePeers.value = offline;
+  return true;
 }
 
 function forgetPeer(id) {
@@ -1262,6 +1362,7 @@ function forgetPeer(id) {
   const next = new Map(peers.value);
   next.delete(id);
   peers.value = next;
+  if (known && activeRotation) abortRotation(activeRotation.id).catch(showError);
   if (selectedPeer.value === id) {
     const offline = new Map(offlinePrivatePeers.value);
     offline.set(id, known || offline.get(id) || { name: shortId(id) });
@@ -1408,7 +1509,9 @@ async function encryptGroupEvent(payload, msgId, sendContext) {
     type: "group_msg",
     room: roomId.value,
     from: deviceId.value,
-    protocol: 3,
+    protocol: PROTOCOL_VERSION,
+    event_id: nextEventId(),
+    key_generation: keyGeneration,
     msg_id: msgId,
     epoch,
     sender_key_id: senderKeyId.value,
@@ -1438,7 +1541,9 @@ async function encryptPrivateEvent(to, payload, msgId, mode) {
         room: roomId.value,
         from: deviceId.value,
         to,
-        protocol: 3,
+        protocol: PROTOCOL_VERSION,
+        event_id: nextEventId(),
+        key_generation: keyGeneration,
         msg_id: msgId,
         nonce,
         ciphertext,
@@ -1458,7 +1563,9 @@ async function encryptPrivateEvent(to, payload, msgId, mode) {
     room: roomId.value,
     from: deviceId.value,
     to,
-    protocol: 3,
+    protocol: PROTOCOL_VERSION,
+    event_id: nextEventId(),
+    key_generation: keyGeneration,
     msg_id: msgId,
     nonce,
     ciphertext,
@@ -1473,8 +1580,8 @@ function encodePlainPayload(payload, mode) {
   return mode === "ws" ? encode(payload) : sodium.from_string(JSON.stringify(payload));
 }
 
-function decodePlainPayload(plaintext, protocol = 3) {
-  if (protocol === 3) {
+function decodePlainPayload(plaintext, protocol = PROTOCOL_VERSION) {
+  if (protocol === PROTOCOL_VERSION) {
     try { return decode(plaintext); } catch { return JSON.parse(sodium.to_string(plaintext)); }
   }
   throw new Error("Unsupported protocol");
@@ -1483,11 +1590,7 @@ function decodePlainPayload(plaintext, protocol = 3) {
 async function decryptGroupPayload(event) {
   const nonce = decodeWireBytes(event.nonce);
   const ciphertext = decodeWireBytes(event.ciphertext);
-  let key = epochKeys.get(Number(event.epoch));
-  if (!key && pendingEpochKeys.has(Number(event.epoch))) {
-    key = pendingEpochKeys.get(Number(event.epoch)).key;
-    activateEpoch(Number(event.epoch), key);
-  }
+  const key = epochKeys.get(Number(event.epoch));
   if (!key) throw new Error("Unknown key epoch");
   const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, ciphertext, canonicalMessageAAD(event), nonce, key);
   return decodePlainPayload(plaintext, event.protocol);
@@ -1499,7 +1602,7 @@ async function decryptPrivatePayload(event, peer) {
   const recipientKeys = event.recipient_key_id === senderKeyId.value ? keyPair.value : boxKeyHistory.get(event.recipient_key_id);
   if (!recipientKeys) throw new Error("Unknown recipient key");
   const senderPublicKey = event.public_key ? asBytes(event.public_key) : peer.publicKey;
-  if (event.protocol === 3) {
+  if (event.protocol === PROTOCOL_VERSION) {
     try {
       return await cryptoCall("privateDecrypt", {
         nonce,
@@ -1545,7 +1648,8 @@ async function sendChunkedEvent(event, { msgId, transport: activeTransport }) {
       room: event.room,
       from: event.from,
       to: event.to || "",
-      protocol: 3,
+      protocol: PROTOCOL_VERSION,
+      event_id: event.event_id,
       msg_id: chunkMsgId,
       transfer_id: msgId,
       message_type: event.type,
@@ -1556,6 +1660,8 @@ async function sendChunkedEvent(event, { msgId, transport: activeTransport }) {
       epoch: event.epoch,
       sender_key_id: event.sender_key_id,
       recipient_key_id: event.recipient_key_id || "",
+      key_generation: event.key_generation,
+      public_key: event.public_key,
     }, activeTransport);
     await ack;
   }
@@ -1581,6 +1687,10 @@ async function receiveGroupMessage(event) {
   }
   const payload = await decryptGroupPayload(event);
   addMessage({ msgId, from: event.from, kind: payload.kind, text: payload.text || "", file: normalizeReceivedFile(payload.file), mine: false, status: "delivered" });
+  if (Number(event.epoch) === currentEpoch) {
+    epochMessageCount += 1;
+    if (epochMessageCount >= 100) maybeStartKeyRotation().catch(showError);
+  }
   notifyIncomingMessage();
   wakeWSRecovery();
 }
@@ -1621,7 +1731,7 @@ async function purgeOwnMessages() {
       type: "purge_self",
       room: roomId.value,
       from: deviceId.value,
-      protocol: 3,
+      protocol: PROTOCOL_VERSION,
     });
   } catch (err) {
     showError(err);
@@ -1638,7 +1748,7 @@ async function leaveRoom() {
       type: "leave_room",
       room: roomId.value,
       from: deviceId.value,
-      protocol: 3,
+      protocol: PROTOCOL_VERSION,
     });
     purgeMessagesFrom(deviceId.value);
     await new Promise((resolve) => setTimeout(resolve, transportMode.value === "ws" ? 150 : 0));
@@ -1658,8 +1768,28 @@ function purgeMessagesFrom(senderId) {
   for (const message of removed) revokeMessageFileUrl(message);
   messages.value = messages.value.filter((message) => message.system || message.from !== senderId);
   for (const [transferId, transfer] of incomingTransfers.entries()) {
-    if (transfer?.event?.from === senderId) incomingTransfers.delete(transferId);
+    if (transfer?.event?.from === senderId) {
+      clearTimeout(transfer.expires);
+      incomingTransfers.delete(transferId);
+    }
   }
+}
+
+function expireLocalRoom() {
+  sessionEpoch += 1;
+  cancelWSRecovery();
+  transport.value?.close();
+  clearPendingTimers();
+  for (const message of messages.value) revokeMessageFileUrl(message);
+  messages.value = [];
+  epochKeys.clear();
+  pendingEpochKeys.clear();
+  boxKeyHistory.clear();
+  peerIdentityPins.clear();
+  seenAuthenticatedEvents.clear();
+  if (identityStorageKey) sessionStorage.removeItem(identityStorageKey);
+  sessionStorage.removeItem(`e2ee-chat-device:${roomId.value}`);
+  location.replace("/");
 }
 
 function revokeMessageFileUrl(message) {
@@ -1740,7 +1870,7 @@ async function sendRecipientAck(msgId, to) {
     room: roomId.value,
     from: deviceId.value,
     to,
-    protocol: 3,
+    protocol: PROTOCOL_VERSION,
     ack_id: msgId,
   });
 }
@@ -1780,21 +1910,31 @@ async function receiveChunk(event) {
   if (!transferId) return;
   const total = Number(event.total || 0);
   const seq = Number(event.seq || 0);
-  if (!Number.isInteger(total) || total <= 0 || !Number.isInteger(seq) || seq < 0 || seq >= total) return;
+  if (!Number.isInteger(total) || total <= 0 || total > maxChunkCount || !Number.isInteger(seq) || seq < 0 || seq >= total) return;
 
   let transfer = incomingTransfers.get(transferId);
   if (!transfer) {
+    if (incomingTransfers.size >= maxIncomingTransfers) return;
     transfer = {
       event,
       chunks: new Array(total),
       received: 0,
+      receivedBytes: 0,
       expires: setTimeout(() => incomingTransfers.delete(transferId), chunkAckTimeoutMs * 2),
     };
     incomingTransfers.set(transferId, transfer);
   }
+  if (transfer.chunks.length !== total || transfer.event.from !== event.from || transfer.event.event_id !== event.event_id || transfer.event.message_type !== event.message_type) return;
   if (!transfer.chunks[seq]) {
-    transfer.chunks[seq] = asBytes(event.ciphertext);
+    const chunk = asBytes(event.ciphertext);
+    if (transfer.receivedBytes + chunk.length > maxEncryptedTransferBytes) {
+      clearTimeout(transfer.expires);
+      incomingTransfers.delete(transferId);
+      return;
+    }
+    transfer.chunks[seq] = chunk;
     transfer.received += 1;
+    transfer.receivedBytes += chunk.length;
   }
   if (transfer.received !== transfer.chunks.length) return;
 
@@ -1822,6 +1962,9 @@ async function offerCurrentEpochToPeer(id) {
   if (!peer?.publicKey || !key) return;
   const rotationId = `join_${base64Url(sodium.randombytes_buf(12))}`;
   await sendSignedEvent({ type: "join_key_offer", room: roomId.value, from: deviceId.value, to: id, rotation_id: rotationId, epoch: currentEpoch - 1, next_epoch: currentEpoch, roster_hash: rosterDigest(), recipient_key_id: peer.keyId, sealed_key: sodium.crypto_box_seal(key, peer.publicKey) });
+  const next = new Map(peers.value);
+  if (next.has(id)) next.set(id, { ...next.get(id), ready: false, joinRotationId: rotationId });
+  peers.value = next;
 }
 
 function rosterDigest(roster = rotationRoster()) {
@@ -1837,7 +1980,7 @@ async function maybeStartKeyRotation() {
   const nextEpoch = currentEpoch + 1;
   const key = sodium.randombytes_buf(32);
   const hash = rosterDigest(roster);
-  activeRotation = { id: rotationId, nextEpoch, key, hash, roster, ready: new Set([deviceId.value]), timeout: null };
+  activeRotation = { role: "coordinator", coordinator: deviceId.value, id: rotationId, epoch: currentEpoch, nextEpoch, key, hash, roster, ready: new Set([deviceId.value]), timeout: null };
   await sendSignedEvent({ type: "key_prepare", room: roomId.value, from: deviceId.value, rotation_id: rotationId, epoch: currentEpoch, next_epoch: nextEpoch, roster_hash: hash });
   for (const id of roster.slice(1)) {
     const peer = peers.value.get(id);
@@ -1850,38 +1993,79 @@ async function maybeStartKeyRotation() {
 
 async function handleKeyEvent(event) {
   if (event.type === "key_prepare") {
-    if (Number(event.epoch) !== currentEpoch || !sodium.memcmp(asBytes(event.roster_hash), rosterDigest())) return;
-    activeRotation = { id: event.rotation_id, nextEpoch: Number(event.next_epoch), hash: asBytes(event.roster_hash), roster: rotationRoster(), ready: new Set(), coordinator: event.from };
+    const roster = rotationRoster();
+    const epoch = Number(event.epoch);
+    const nextEpoch = Number(event.next_epoch);
+    if (activeRotation || pendingEpochKeys.size || event.from !== roster[0] || epoch !== currentEpoch || nextEpoch !== currentEpoch + 1 || !sodium.memcmp(asBytes(event.roster_hash), rosterDigest(roster))) return;
+    activeRotation = {
+      role: "participant", coordinator: event.from, id: event.rotation_id, epoch, nextEpoch,
+      hash: asBytes(event.roster_hash), roster, ready: new Set(),
+      timeout: setTimeout(() => abortRotation(event.rotation_id), 30000),
+    };
     return;
   }
-  if (event.type === "key_offer" || event.type === "join_key_offer") {
-    if (event.to !== deviceId.value || event.recipient_key_id !== senderKeyId.value) return;
+  if (event.type === "key_offer") {
+    const rotation = activeRotation;
+    if (!rotation || rotation.role !== "participant" || event.from !== rotation.coordinator || event.rotation_id !== rotation.id ||
+        event.to !== deviceId.value || event.recipient_key_id !== senderKeyId.value || Number(event.epoch) !== rotation.epoch ||
+        Number(event.next_epoch) !== rotation.nextEpoch || !sodium.memcmp(asBytes(event.roster_hash), rotation.hash)) return;
     const key = sodium.crypto_box_seal_open(asBytes(event.sealed_key), keyPair.value.publicKey, keyPair.value.privateKey);
-    pendingEpochKeys.set(Number(event.next_epoch), { key, rotationId: event.rotation_id, receivedAt: Date.now() });
-    await sendSignedEvent({ type: event.type === "key_offer" ? "key_ready" : "join_key_ready", room: roomId.value, from: deviceId.value, to: event.from, rotation_id: event.rotation_id, epoch: currentEpoch, next_epoch: Number(event.next_epoch), roster_hash: asBytes(event.roster_hash) });
+    pendingEpochKeys.set(rotation.nextEpoch, { key, rotationId: rotation.id, coordinator: rotation.coordinator, rosterHash: rotation.hash, receivedAt: Date.now() });
+    await sendSignedEvent({ type: "key_ready", room: roomId.value, from: deviceId.value, to: rotation.coordinator, rotation_id: rotation.id, epoch: rotation.epoch, next_epoch: rotation.nextEpoch, roster_hash: rotation.hash });
     return;
   }
-  if (event.type === "key_ready" && activeRotation?.id === event.rotation_id && event.to === deviceId.value) {
-    activeRotation.ready.add(event.from);
-    if (activeRotation.roster.every((id) => activeRotation.ready.has(id))) await commitRotation();
+  if (event.type === "join_key_offer") {
+    const nextEpoch = Number(event.next_epoch);
+    const roster = rotationRoster();
+    if (event.to !== deviceId.value || event.from !== roster[0] || event.recipient_key_id !== senderKeyId.value || nextEpoch <= currentEpoch || Number(event.epoch) !== nextEpoch - 1 || asBytes(event.roster_hash).length !== 32) return;
+    const key = sodium.crypto_box_seal_open(asBytes(event.sealed_key), keyPair.value.publicKey, keyPair.value.privateKey);
+    await sendSignedEvent({ type: "join_key_ready", room: roomId.value, from: deviceId.value, to: event.from, rotation_id: event.rotation_id, epoch: Number(event.epoch), next_epoch: nextEpoch, roster_hash: asBytes(event.roster_hash) });
+    activateEpoch(nextEpoch, key);
+    return;
+  }
+  if (event.type === "key_ready") {
+    const rotation = activeRotation;
+    if (!rotation || rotation.role !== "coordinator" || event.to !== deviceId.value || event.rotation_id !== rotation.id ||
+        !rotation.roster.includes(event.from) || Number(event.epoch) !== rotation.epoch || Number(event.next_epoch) !== rotation.nextEpoch ||
+        !sodium.memcmp(asBytes(event.roster_hash), rotation.hash) || !sameRoster(rotation.roster, rotationRoster())) return;
+    rotation.ready.add(event.from);
+    if (rotation.roster.every((id) => rotation.ready.has(id))) await commitRotation();
+    return;
+  }
+  if (event.type === "join_key_ready") {
+    const peer = peers.value.get(event.from);
+    if (event.to !== deviceId.value || !peer || peer.joinRotationId !== event.rotation_id || Number(event.next_epoch) !== currentEpoch) return;
+    const next = new Map(peers.value);
+    next.set(event.from, { ...peer, ready: true, joinRotationId: "" });
+    peers.value = next;
     return;
   }
   if (event.type === "key_commit") {
-    const pending = pendingEpochKeys.get(Number(event.next_epoch));
-    if (pending?.rotationId === event.rotation_id) activateEpoch(Number(event.next_epoch), pending.key);
+    const rotation = activeRotation;
+    const nextEpoch = Number(event.next_epoch);
+    const pending = pendingEpochKeys.get(nextEpoch);
+    if (!rotation || rotation.role !== "participant" || event.from !== rotation.coordinator || event.rotation_id !== rotation.id ||
+        Number(event.epoch) !== rotation.epoch || nextEpoch !== rotation.nextEpoch || !sameRoster(rotation.roster, rotationRoster()) ||
+        !sodium.memcmp(asBytes(event.roster_hash), rotation.hash) || pending?.rotationId !== rotation.id || pending.coordinator !== rotation.coordinator) return;
+    clearTimeout(rotation.timeout);
+    activateEpoch(nextEpoch, pending.key);
     activeRotation = null;
     return;
   }
   if (event.type === "key_abort") {
+    const rotation = activeRotation;
+    if (!rotation || event.rotation_id !== rotation.id || !rotation.roster.includes(event.from) || Number(event.epoch) !== rotation.epoch || Number(event.next_epoch) !== rotation.nextEpoch || !sodium.memcmp(asBytes(event.roster_hash), rotation.hash)) return;
+    clearTimeout(rotation.timeout);
     for (const [epoch, pending] of pendingEpochKeys) if (pending.rotationId === event.rotation_id) pendingEpochKeys.delete(epoch);
-    if (activeRotation?.id === event.rotation_id) activeRotation = null;
+    activeRotation = null;
+    return;
   }
-  if (event.type === "device_key_update") rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id);
+  if (event.type === "device_key_update") applyDeviceKeyUpdate(event);
 }
 
 async function commitRotation() {
   const rotation = activeRotation;
-  if (!rotation) return;
+  if (!rotation || rotation.role !== "coordinator" || !sameRoster(rotation.roster, rotationRoster()) || !rotation.roster.every((id) => rotation.ready.has(id))) return;
   clearTimeout(rotation.timeout);
   await sendSignedEvent({ type: "key_commit", room: roomId.value, from: deviceId.value, rotation_id: rotation.id, epoch: currentEpoch, next_epoch: rotation.nextEpoch, roster_hash: rotation.hash });
   activateEpoch(rotation.nextEpoch, rotation.key);
@@ -1890,8 +2074,15 @@ async function commitRotation() {
 
 async function abortRotation(rotationId) {
   if (activeRotation?.id !== rotationId) return;
-  await sendSignedEvent({ type: "key_abort", room: roomId.value, from: deviceId.value, rotation_id: rotationId, epoch: currentEpoch, next_epoch: activeRotation.nextEpoch, roster_hash: activeRotation.hash }).catch(() => {});
+  const rotation = activeRotation;
+  clearTimeout(rotation.timeout);
+  await sendSignedEvent({ type: "key_abort", room: roomId.value, from: deviceId.value, rotation_id: rotationId, epoch: rotation.epoch, next_epoch: rotation.nextEpoch, roster_hash: rotation.hash }).catch(() => {});
+  for (const [epoch, pending] of pendingEpochKeys) if (pending.rotationId === rotationId) pendingEpochKeys.delete(epoch);
   activeRotation = null;
+}
+
+function sameRoster(left, right) {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
 }
 
 function activateEpoch(epoch, key) {
@@ -1905,13 +2096,16 @@ function activateEpoch(epoch, key) {
   const previousKeyId = senderKeyId.value;
   boxKeyHistory.set(previousKeyId, keyPair.value);
   keyPair.value = sodium.crypto_box_keypair();
-  senderKeyId.value = base64Url(sodium.crypto_generichash(12, keyPair.value.publicKey));
-  sendSignedEvent({ type: "device_key_update", room: roomId.value, from: deviceId.value, public_key: keyPair.value.publicKey, sign_public_key: signingKeyPair.value.publicKey, sender_key_id: senderKeyId.value }).catch(showError);
+  senderKeyId.value = keyIdFor(keyPair.value.publicKey);
+  keyGeneration += 1;
+  persistCryptoSession();
+  sendSignedEvent({ type: "device_key_update", room: roomId.value, from: deviceId.value, public_key: keyPair.value.publicKey, sign_public_key: signingKeyPair.value.publicKey, sender_key_id: senderKeyId.value, key_generation: keyGeneration }).catch(showError);
   setTimeout(() => {
     for (const oldEpoch of [...epochKeys.keys()].sort((a, b) => a - b)) {
       if (oldEpoch < currentEpoch && epochKeys.size > 1 && activeSendOperations === 0 && incomingTransfers.size === 0) epochKeys.delete(oldEpoch);
     }
     if (activeSendOperations === 0 && incomingTransfers.size === 0) boxKeyHistory.delete(previousKeyId);
+    persistCryptoSession();
   }, 120000);
 }
 
@@ -1920,31 +2114,62 @@ function requiresPeerSignature(type) {
 }
 
 function verifyHelloEvent(event) {
-  if (event.protocol !== 3 || event.from === deviceId.value) return true;
+  if (event.protocol !== PROTOCOL_VERSION) return false;
   try {
+    if (!event.event_id || !Number.isInteger(Number(event.key_generation)) || Number(event.key_generation) < 0) return false;
+    const signPublicKey = asBytes(event.sign_public_key);
+    const expectedSignPublicKey = event.from === deviceId.value
+      ? signingKeyPair.value.publicKey
+      : peerIdentityPins.get(event.from)?.signPublicKey;
+    if (expectedSignPublicKey && !sodium.memcmp(expectedSignPublicKey, signPublicKey)) return false;
+    if (event.sender_key_id !== keyIdFor(asBytes(event.public_key))) return false;
     const unsigned = { ...event, signature: undefined, hello_mac: undefined };
     if (!sodium.crypto_auth_verify(asBytes(event.hello_mac), canonicalEventBytes(unsigned), authKey.value)) return false;
     const signed = { ...event, signature: undefined };
-    return sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes(signed), asBytes(event.sign_public_key));
+    if (!sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes(signed), signPublicKey)) return false;
+    return rememberAuthenticatedEvent(event);
   } catch { return false; }
 }
 
 function verifyPeerEvent(event) {
-  if (event.from === deviceId.value) return true;
-  const peer = peers.value.get(event.from);
-  if (!peer?.signPublicKey || !event.signature) return false;
-  const replayId = `${event.from}:${event.type}:${event.msg_id || event.rotation_id || event.ack_id || ""}:${event.seq || 0}`;
+  const peer = signingIdentityForEvent(event, {
+    ownDeviceId: deviceId.value,
+    ownSignPublicKey: signingKeyPair.value?.publicKey,
+    ownKeyGeneration: keyGeneration,
+    peer: peers.value.get(event.from) || peerIdentityPins.get(event.from),
+  });
+  if (!peer || !sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey)) return false;
+  return rememberAuthenticatedEvent(event);
+}
+
+function rememberAuthenticatedEvent(event) {
+  const replayId = authenticatedEventReplayKey(event);
+  if (!replayId) return false;
   if (seenAuthenticatedEvents.has(replayId)) return false;
-  const ok = sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey);
-  if (ok) {
-    seenAuthenticatedEvents.add(replayId);
-    if (seenAuthenticatedEvents.size > 5000) seenAuthenticatedEvents.delete(seenAuthenticatedEvents.values().next().value);
-  }
-  return ok;
+  seenAuthenticatedEvents.add(replayId);
+  if (seenAuthenticatedEvents.size > 5000) seenAuthenticatedEvents.delete(seenAuthenticatedEvents.values().next().value);
+  return true;
+}
+
+function applyDeviceKeyUpdate(event) {
+  const current = peers.value.get(event.from) || peerIdentityPins.get(event.from);
+  const generation = Number(event.key_generation);
+  const publicKey = asBytes(event.public_key);
+  if (!current || generation !== Number(current.keyGeneration || 0) + 1) return false;
+  if (!sodium.memcmp(asBytes(event.sign_public_key), current.signPublicKey)) return false;
+  if (event.sender_key_id !== keyIdFor(publicKey)) return false;
+  return rememberPeer(event.from, publicKey, event.display_name, current.signPublicKey, event.sender_key_id, generation);
 }
 
 async function sendSignedEvent(event, activeTransport = transport.value) {
-  const complete = { ...event, protocol: 3, epoch: event.epoch ?? currentEpoch, sender_key_id: event.sender_key_id || senderKeyId.value };
+  const complete = {
+    ...event,
+    protocol: PROTOCOL_VERSION,
+    event_id: event.event_id || nextEventId(),
+    epoch: event.epoch ?? currentEpoch,
+    sender_key_id: event.sender_key_id || senderKeyId.value,
+    key_generation: event.key_generation ?? keyGeneration,
+  };
   if (complete.type === "peer_hello") {
     complete.hello_mac = sodium.crypto_auth(canonicalEventBytes(complete), authKey.value);
   }
@@ -2031,7 +2256,7 @@ function updateDisplayName() {
     type: "hello",
     room: roomId.value,
     from: deviceId.value,
-    protocol: 3,
+    protocol: PROTOCOL_VERSION,
     public_key: transportMode.value === "ws" ? keyPair.value.publicKey : b64(keyPair.value.publicKey),
     display_name: displayName.value,
   }).catch(showError);
@@ -2129,13 +2354,22 @@ function revokeSelectedFileUrl() {
 }
 
 function addMessage(message) {
-  messages.value.push({ id: nextMessageId(), ...message });
+  messages.value.push({ id: nextMessageId(), receivedAt: Date.now(), ...message });
+  pruneMessages();
   scrollMessages();
 }
 
 function addSystemMessage(text) {
-  messages.value.push({ id: nextMessageId(), text, system: true });
+  messages.value.push({ id: nextMessageId(), receivedAt: Date.now(), text, system: true });
+  pruneMessages();
   scrollMessages();
+}
+
+function pruneMessages(now = Date.now()) {
+  const { retained, removed } = partitionRetainedMessages(messages.value, now);
+  if (!removed.length) return;
+  for (const message of removed) revokeMessageFileUrl(message);
+  messages.value = retained;
 }
 
 function scrollMessages() {
@@ -2498,6 +2732,14 @@ function nextMessageId() {
   messageSeq += 1;
   const suffix = cryptoReady.value ? base64Url(sodium.randombytes_buf(8)) : String(Date.now());
   return `msg_${messageSeq}_${suffix}`;
+}
+
+function nextEventId() {
+  return `evt_${base64Url(sodium.randombytes_buf(16))}`;
+}
+
+function keyIdFor(publicKey) {
+  return base64Url(sodium.crypto_generichash(12, asBytes(publicKey)));
 }
 
 function shortId(id) {

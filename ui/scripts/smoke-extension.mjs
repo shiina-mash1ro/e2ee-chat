@@ -51,7 +51,7 @@ try {
   const validationNotice = await options.locator("#notice").textContent();
   if (!validationNotice?.includes("服务验证成功")) throw new Error(`extension origin validation failed: ${validationNotice || "no notice"}`);
   const validated = await options.evaluate(() => chrome.storage.sync.get(["chatOrigin", "chatOriginValidation"]));
-  if (validated.chatOrigin !== baseURL || validated.chatOriginValidation?.protocol !== 3) throw new Error("validated origin metadata was not stored");
+  if (validated.chatOrigin !== baseURL || validated.chatOriginValidation?.protocol !== 4) throw new Error("validated origin metadata was not stored");
 
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);

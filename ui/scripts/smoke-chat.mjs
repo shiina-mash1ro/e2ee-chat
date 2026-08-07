@@ -15,6 +15,7 @@ try {
   await runFullLinkSmoke();
   await runSSERecoverySmoke();
   await runCodeSmoke();
+  await runKeyRotationSmoke();
   await runMultiRoomIsolationSmoke();
 } finally {
   await browser.close();
@@ -92,7 +93,7 @@ async function runPopupModeSmoke() {
     const popupPromise = page.waitForEvent("popup");
     await page.getByRole("button", { name: "创建大力房间" }).click();
     const popup = await popupPromise;
-    await popup.waitForEvent("close", { timeout: 10000 });
+    await waitForPageClose(popup, 10000);
     const notice = page.locator(".notice");
     await notice.waitFor({ timeout: 10000 });
     if (!(await notice.innerText()).includes("HTTP 500")) {
@@ -102,6 +103,14 @@ async function runPopupModeSmoke() {
   } finally {
     await failedContext.close();
   }
+}
+
+async function waitForPageClose(page, timeout) {
+  if (page.isClosed()) return;
+  await Promise.race([
+    page.waitForEvent("close", { timeout }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`popup did not close within ${timeout}ms`)), timeout)),
+  ]);
 }
 
 async function useSameTabMode(context) {
@@ -143,6 +152,45 @@ async function runMultiRoomIsolationSmoke() {
     console.log(JSON.stringify({ mode: "multi-room-tabs", firstDevice, secondDevice }, null, 2));
   } finally {
     await context.close();
+  }
+}
+
+async function runKeyRotationSmoke() {
+  const senderContext = await browser.newContext();
+  const receiverContext = await browser.newContext();
+  try {
+    await Promise.all([senderContext, receiverContext].map(useSameTabMode));
+    const sender = await senderContext.newPage();
+    await sender.goto(baseURL, { waitUntil: "domcontentloaded" });
+    await sender.getByRole("button", { name: "创建大力房间" }).click();
+    await sender.waitForURL(/\/r\/.+#k=.+/, { timeout: 10000 });
+    await enterName(sender, "Rotation sender");
+
+    const receiver = await receiverContext.newPage();
+    await receiver.goto(sender.url(), { waitUntil: "domcontentloaded" });
+    await enterName(receiver, "Rotation receiver");
+    await sender.locator(".members .n-list-item").filter({ hasText: "私发唯一码" }).waitFor({ timeout: 10000 });
+
+    for (let index = 0; index < 100; index += 1) {
+      const text = `rotation-message-${index}`;
+      await sender.getByPlaceholder("输入消息").fill(text);
+      await sender.getByRole("button", { name: "发送群聊" }).click();
+      await receiver.locator(".message-bubble .text").filter({ hasText: text }).waitFor({ timeout: 10000 });
+    }
+
+    await sender.getByPlaceholder("输入消息").fill("after-key-rotation");
+    await sender.getByRole("button", { name: "发送群聊" }).click();
+    await receiver.getByText("after-key-rotation", { exact: true }).waitFor({ timeout: 10000 });
+
+    await receiver.reload({ waitUntil: "domcontentloaded" });
+    await receiver.getByText("已连接", { exact: true }).waitFor({ timeout: 10000 });
+    await sender.getByPlaceholder("输入消息").fill("after-epoch-refresh");
+    await sender.getByRole("button", { name: "发送群聊" }).click();
+    await receiver.getByText("after-epoch-refresh", { exact: true }).waitFor({ timeout: 10000 });
+    console.log(JSON.stringify({ mode: "key-rotation-and-refresh" }, null, 2));
+  } finally {
+    await senderContext.close();
+    await receiverContext.close();
   }
 }
 

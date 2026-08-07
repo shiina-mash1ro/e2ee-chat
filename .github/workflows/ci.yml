@@ -38,6 +38,10 @@ jobs:
         working-directory: ui
         run: npm run test:protocol
 
+      - name: Test extension helpers
+        working-directory: ui
+        run: npm run test:extension
+
       - name: Build frontend and extension
         working-directory: ui
         run: npm run build:all

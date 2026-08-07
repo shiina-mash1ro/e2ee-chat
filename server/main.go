@@ -14,6 +14,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -26,19 +27,25 @@ import (
 )
 
 const (
-	maxBodyBytes       = 50 * 1024 * 1024
-	defaultRoomClients = 4
-	maxRoomClients     = 100
-	clientBufSize      = 64
-	pingInterval       = 25 * time.Second
-	codeLimit          = 3
-	codeWindow         = time.Minute
-	powTTL             = 2 * time.Minute
+	maxBodyBytes        = 50 * 1024 * 1024
+	maxSSEBodyBytes     = 8 * 1024 * 1024
+	maxChunkBytes       = 512 * 1024
+	maxChunkCount       = 128
+	defaultRoomClients  = 4
+	maxRoomClients      = 100
+	clientBufSize       = 64
+	pingInterval        = 25 * time.Second
+	codeLimit           = 3
+	codeWindow          = time.Minute
+	powTTL              = 2 * time.Minute
+	protocolVersion     = 4
+	defaultRoomLifetime = 6 * time.Hour
 )
 
 var (
 	roomIDRe     = regexp.MustCompile(`^[A-Za-z0-9_-]{3,64}$`)
 	clientIDRe   = regexp.MustCompile(`^[A-Za-z0-9_-]{8,96}$`)
+	eventIDRe    = regexp.MustCompile(`^evt_[A-Za-z0-9_-]{16,64}$`)
 	codeRe       = regexp.MustCompile(`^[A-Z0-9]{4,32}$`)
 	buildVersion = "dev"
 )
@@ -51,6 +58,7 @@ type Hub struct {
 	powSecret     []byte
 	powDifficulty int
 	leaveGrace    time.Duration
+	roomLifetime  time.Duration
 }
 
 type Room struct {
@@ -60,6 +68,9 @@ type Room struct {
 	purgeEpochs map[string]uint64
 	maxClients  int
 	configured  bool
+	createdAt   time.Time
+	expiresAt   time.Time
+	expiryTimer *time.Timer
 }
 
 type Client struct {
@@ -74,6 +85,7 @@ type wsEnvelope struct {
 	From           string   `msgpack:"from" json:"from"`
 	To             string   `msgpack:"to,omitempty" json:"to,omitempty"`
 	Protocol       int      `msgpack:"protocol,omitempty" json:"protocol,omitempty"`
+	EventID        string   `msgpack:"event_id,omitempty" json:"event_id,omitempty"`
 	MsgID          string   `msgpack:"msg_id,omitempty" json:"msg_id,omitempty"`
 	AckID          string   `msgpack:"ack_id,omitempty" json:"ack_id,omitempty"`
 	TransferID     string   `msgpack:"transfer_id,omitempty" json:"transfer_id,omitempty"`
@@ -86,6 +98,7 @@ type wsEnvelope struct {
 	SenderKeyID    string   `msgpack:"sender_key_id,omitempty" json:"sender_key_id,omitempty"`
 	RecipientKeyID string   `msgpack:"recipient_key_id,omitempty" json:"recipient_key_id,omitempty"`
 	RotationID     string   `msgpack:"rotation_id,omitempty" json:"rotation_id,omitempty"`
+	KeyGeneration  int      `msgpack:"key_generation,omitempty" json:"key_generation,omitempty"`
 	PublicKey      []byte   `msgpack:"public_key,omitempty" json:"public_key,omitempty"`
 	SignPublicKey  []byte   `msgpack:"sign_public_key,omitempty" json:"sign_public_key,omitempty"`
 	HelloMAC       []byte   `msgpack:"hello_mac,omitempty" json:"hello_mac,omitempty"`
@@ -115,6 +128,7 @@ type inboundEvent struct {
 	From           string   `json:"from"`
 	To             string   `json:"to,omitempty"`
 	Protocol       int      `json:"protocol"`
+	EventID        string   `json:"event_id,omitempty"`
 	MsgID          string   `json:"msg_id,omitempty"`
 	AckID          string   `json:"ack_id,omitempty"`
 	TransferID     string   `json:"transfer_id,omitempty"`
@@ -127,6 +141,7 @@ type inboundEvent struct {
 	SenderKeyID    string   `json:"sender_key_id,omitempty"`
 	RecipientKeyID string   `json:"recipient_key_id,omitempty"`
 	RotationID     string   `json:"rotation_id,omitempty"`
+	KeyGeneration  int      `json:"key_generation,omitempty"`
 	PublicKey      string   `json:"public_key,omitempty"`
 	SignPublicKey  string   `json:"sign_public_key,omitempty"`
 	HelloMAC       string   `json:"hello_mac,omitempty"`
@@ -220,6 +235,7 @@ func newHub() *Hub {
 		powSecret:     secret,
 		powDifficulty: envInt("POW_DIFFICULTY", 12),
 		leaveGrace:    30 * time.Second,
+		roomLifetime:  defaultRoomLifetime,
 	}
 }
 
@@ -227,7 +243,10 @@ func (h *Hub) addClient(roomID string, c *Client) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.roomLocked(roomID)
+	room, err := h.activeRoomLocked(roomID)
+	if err != nil {
+		return err
+	}
 	if roomAtCapacityLocked(room, c.id) {
 		return errors.New("room is full")
 	}
@@ -260,11 +279,11 @@ func (h *Hub) broadcast(roomID string, msg []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.roomLocked(roomID)
-	h.broadcastToSSELocked(room, nil, msg)
-	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
-		delete(h.rooms, roomID)
+	room, err := h.activeRoomLocked(roomID)
+	if err != nil {
+		return
 	}
+	h.broadcastToSSELocked(room, nil, msg)
 }
 
 func (h *Hub) roomLocked(roomID string) *Room {
@@ -297,11 +316,47 @@ func (h *Hub) roomLocked(roomID string) *Room {
 	return room
 }
 
+func (h *Hub) activeRoomLocked(roomID string) (*Room, error) {
+	room := h.rooms[roomID]
+	if room == nil || !room.configured {
+		return nil, errors.New("room not found")
+	}
+	if !room.expiresAt.IsZero() && !time.Now().Before(room.expiresAt) {
+		h.expireRoomLocked(roomID, room)
+		return nil, errors.New("room expired")
+	}
+	return room, nil
+}
+
+func (h *Hub) expireRoomLocked(roomID string, room *Room) {
+	if h.rooms[roomID] != room {
+		return
+	}
+	for _, timer := range room.purgeTimers {
+		timer.Stop()
+	}
+	jsonBody := []byte(fmt.Sprintf(`{"type":"room_expired","room":%q,"from":"server","protocol":%d}`, roomID, protocolVersion))
+	h.broadcastToSSELocked(room, nil, jsonBody)
+	if body, err := msgpack.Marshal(wsEnvelope{Type: "room_expired", Room: roomID, From: "server", Protocol: protocolVersion}); err == nil {
+		h.broadcastToWSLocked(room, nil, body)
+	}
+	for _, client := range room.sseClients {
+		close(client.events)
+	}
+	for _, client := range room.wsClients {
+		close(client.events)
+	}
+	delete(h.rooms, roomID)
+}
+
 func (h *Hub) addWSClient(roomID string, c *Client) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.roomLocked(roomID)
+	room, err := h.activeRoomLocked(roomID)
+	if err != nil {
+		return err
+	}
 	if roomAtCapacityLocked(room, c.id) {
 		return errors.New("room is full")
 	}
@@ -350,6 +405,14 @@ func (h *Hub) configureRoom(roomID string, maxClients int) error {
 	}
 	room.maxClients = maxClients
 	room.configured = true
+	room.createdAt = time.Now()
+	room.expiresAt = room.createdAt.Add(h.roomLifetime)
+	configuredRoom := room
+	room.expiryTimer = time.AfterFunc(time.Until(room.expiresAt), func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.expireRoomLocked(roomID, configuredRoom)
+	})
 	return nil
 }
 
@@ -396,16 +459,13 @@ func (h *Hub) schedulePurgeLocked(roomID string, room *Room, clientID string) {
 		}
 		delete(current.purgeTimers, clientID)
 		h.broadcastPeerPurgeLocked(roomID, current, clientID)
-		if len(current.sseClients)+len(current.wsClients) == 0 && len(current.purgeTimers) == 0 {
-			delete(h.rooms, roomID)
-		}
 	})
 }
 
 func (h *Hub) broadcastPeerPurgeLocked(roomID string, room *Room, clientID string) {
-	jsonBody := []byte(fmt.Sprintf(`{"type":"peer_purge","room":%q,"from":%q,"protocol":3}`, roomID, clientID))
+	jsonBody := []byte(fmt.Sprintf(`{"type":"peer_purge","room":%q,"from":%q,"protocol":%d}`, roomID, clientID, protocolVersion))
 	h.broadcastToSSELocked(room, nil, jsonBody)
-	wsBody, err := msgpack.Marshal(wsEnvelope{Type: "peer_purge", Room: roomID, From: clientID, Protocol: 3})
+	wsBody, err := msgpack.Marshal(wsEnvelope{Type: "peer_purge", Room: roomID, From: clientID, Protocol: protocolVersion})
 	if err == nil {
 		h.broadcastToWSLocked(room, nil, wsBody)
 	}
@@ -436,14 +496,11 @@ func (h *Hub) explicitAction(roomID, clientID, token string, wsClient *Client, l
 			delete(room.wsClients, clientID)
 		}
 		close(client.events)
-		jsonLeave := []byte(fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q,"protocol":3}`, roomID, clientID))
+		jsonLeave := []byte(fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q,"protocol":%d}`, roomID, clientID, protocolVersion))
 		h.broadcastToSSELocked(room, nil, jsonLeave)
-		wsLeave, err := msgpack.Marshal(wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 3})
+		wsLeave, err := msgpack.Marshal(wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: protocolVersion})
 		if err == nil {
 			h.broadcastToWSLocked(room, nil, wsLeave)
-		}
-		if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
-			delete(h.rooms, roomID)
 		}
 	}
 	return true
@@ -456,22 +513,36 @@ func (h *Hub) clientOnline(roomID, clientID string) bool {
 	return room != nil && (room.sseClients[clientID] != nil || room.wsClients[clientID] != nil)
 }
 
+func (h *Hub) authorizeSSE(roomID, clientID, token string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	room := h.rooms[roomID]
+	client := (*Client)(nil)
+	if room != nil {
+		client = room.sseClients[clientID]
+	}
+	return client != nil && token != "" && client.token == token
+}
+
 func (h *Hub) broadcastWS(roomID string, msg []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.roomLocked(roomID)
-	h.broadcastToWSLocked(room, nil, msg)
-	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
-		delete(h.rooms, roomID)
+	room, err := h.activeRoomLocked(roomID)
+	if err != nil {
+		return
 	}
+	h.broadcastToWSLocked(room, nil, msg)
 }
 
 func (h *Hub) dispatchSSE(roomID string, event inboundEvent, msg []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.roomLocked(roomID)
+	room, err := h.activeRoomLocked(roomID)
+	if err != nil {
+		return
+	}
 	targets := eventTargets(event.Type, event.From, event.To)
 	h.broadcastToSSELocked(room, targets, msg)
 	if wsEvent, err := event.toWS(); err == nil {
@@ -479,25 +550,22 @@ func (h *Hub) dispatchSSE(roomID string, event inboundEvent, msg []byte) {
 			h.broadcastToWSLocked(room, targets, wsBody)
 		}
 	}
-	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
-		delete(h.rooms, roomID)
-	}
 }
 
 func (h *Hub) dispatchWS(roomID string, event wsEnvelope, msg []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	room := h.roomLocked(roomID)
+	room, err := h.activeRoomLocked(roomID)
+	if err != nil {
+		return
+	}
 	targets := eventTargets(event.Type, event.From, event.To)
 	h.broadcastToWSLocked(room, targets, msg)
 	if sseEvent := event.toSSE(); sseEvent != nil {
 		if sseBody, err := json.Marshal(sseEvent); err == nil {
 			h.broadcastToSSELocked(room, targets, sseBody)
 		}
-	}
-	if len(room.sseClients)+len(room.wsClients) == 0 && len(room.purgeTimers) == 0 {
-		delete(h.rooms, roomID)
 	}
 }
 
@@ -540,7 +608,7 @@ func (e inboundEvent) toWS() (wsEnvelope, error) {
 	if err != nil {
 		return wsEnvelope{}, err
 	}
-	return wsEnvelope{Type: e.Type, Room: e.Room, From: e.From, To: e.To, Protocol: e.Protocol, MsgID: e.MsgID, AckID: e.AckID, TransferID: e.TransferID, MessageType: e.MessageType, Features: e.Features, Seq: e.Seq, Total: e.Total, Epoch: e.Epoch, NextEpoch: e.NextEpoch, SenderKeyID: e.SenderKeyID, RecipientKeyID: e.RecipientKeyID, RotationID: e.RotationID, PublicKey: publicKey, SignPublicKey: signPublicKey, HelloMAC: helloMAC, Signature: signature, Nonce: nonce, Ciphertext: ciphertext, RosterHash: rosterHash, SealedKey: sealedKey, DisplayName: e.DisplayName}, nil
+	return wsEnvelope{Type: e.Type, Room: e.Room, From: e.From, To: e.To, Protocol: e.Protocol, EventID: e.EventID, MsgID: e.MsgID, AckID: e.AckID, TransferID: e.TransferID, MessageType: e.MessageType, Features: e.Features, Seq: e.Seq, Total: e.Total, Epoch: e.Epoch, NextEpoch: e.NextEpoch, SenderKeyID: e.SenderKeyID, RecipientKeyID: e.RecipientKeyID, RotationID: e.RotationID, KeyGeneration: e.KeyGeneration, PublicKey: publicKey, SignPublicKey: signPublicKey, HelloMAC: helloMAC, Signature: signature, Nonce: nonce, Ciphertext: ciphertext, RosterHash: rosterHash, SealedKey: sealedKey, DisplayName: e.DisplayName}, nil
 }
 
 func (e wsEnvelope) toSSE() map[string]any {
@@ -551,6 +619,7 @@ func (e wsEnvelope) toSSE() map[string]any {
 		}
 	}
 	put("to", e.To, e.To != "")
+	put("event_id", e.EventID, e.EventID != "")
 	put("msg_id", e.MsgID, e.MsgID != "")
 	put("ack_id", e.AckID, e.AckID != "")
 	put("transfer_id", e.TransferID, e.TransferID != "")
@@ -563,6 +632,7 @@ func (e wsEnvelope) toSSE() map[string]any {
 	put("sender_key_id", e.SenderKeyID, e.SenderKeyID != "")
 	put("recipient_key_id", e.RecipientKeyID, e.RecipientKeyID != "")
 	put("rotation_id", e.RotationID, e.RotationID != "")
+	put("key_generation", e.KeyGeneration, true)
 	put("display_name", e.DisplayName, e.DisplayName != "")
 	binary := map[string][]byte{"public_key": e.PublicKey, "sign_public_key": e.SignPublicKey, "hello_mac": e.HelloMAC, "signature": e.Signature, "nonce": e.Nonce, "ciphertext": e.Ciphertext, "roster_hash": e.RosterHash, "sealed_key": e.SealedKey}
 	for key, value := range binary {
@@ -671,7 +741,7 @@ func extensionInfoHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"app":          "e2ee-chat",
 		"extensionApi": 1,
-		"protocol":     3,
+		"protocol":     protocolVersion,
 		"build":        buildVersion,
 	})
 }
@@ -698,6 +768,30 @@ func extensionCORS(next http.Handler, configured string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func webSocketOriginAllowed(r *http.Request, configured string) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	if parsed.Scheme == "chrome-extension" || parsed.Scheme == "extension" {
+		for _, value := range strings.Split(configured, ",") {
+			if strings.TrimSpace(value) == origin {
+				return true
+			}
+		}
+		return false
+	}
+	expectedScheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		expectedScheme = "https"
+	}
+	return parsed.Scheme == expectedScheme && strings.EqualFold(parsed.Host, r.Host)
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -792,7 +886,18 @@ func (h *Hub) joinCodeRoom(w http.ResponseWriter, r *http.Request) {
 	if !h.verifyCodeRequest(w, r, req.Pow) {
 		return
 	}
+	if !h.roomActive(code) {
+		http.Error(w, "room not found or expired", http.StatusNotFound)
+		return
+	}
 	writeJSON(w, codeRoomResponse{Code: code, URL: "/r/" + code + "#p=" + code})
+}
+
+func (h *Hub) roomActive(roomID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	_, err := h.activeRoomLocked(roomID)
+	return err == nil
 }
 
 func (h *Hub) verifyCodeRequest(w http.ResponseWriter, r *http.Request, proof powProof) bool {
@@ -905,7 +1010,7 @@ func (h *Hub) eventsHandler(w http.ResponseWriter, r *http.Request, roomID strin
 	defer func() {
 		removed := h.removeClient(roomID, client)
 		if removed && !h.clientOnline(roomID, clientID) {
-			leave := fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q,"protocol":3}`, roomID, clientID)
+			leave := fmt.Sprintf(`{"type":"peer_leave","room":%q,"from":%q,"protocol":%d}`, roomID, clientID, protocolVersion)
 			h.broadcast(roomID, []byte(leave))
 		}
 	}()
@@ -943,7 +1048,7 @@ func (h *Hub) eventsHandler(w http.ResponseWriter, r *http.Request, roomID strin
 func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 	defer r.Body.Close()
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSSEBodyBytes))
 	if err != nil {
 		http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 		return
@@ -962,7 +1067,7 @@ func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID str
 		http.Error(w, "invalid event type", http.StatusBadRequest)
 		return
 	}
-	if event.Room != "" && event.Room != roomID {
+	if event.Room != roomID {
 		http.Error(w, "room mismatch", http.StatusBadRequest)
 		return
 	}
@@ -978,8 +1083,12 @@ func (h *Hub) messagesHandler(w http.ResponseWriter, r *http.Request, roomID str
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	connectionToken := r.Header.Get("X-Connection-Token")
+	if event.From == "" || !h.authorizeSSE(roomID, event.From, connectionToken) {
+		http.Error(w, "unauthorized sender", http.StatusUnauthorized)
+		return
+	}
 	if event.Type == "purge_self" || event.Type == "leave_room" {
-		connectionToken := r.Header.Get("X-Connection-Token")
 		if event.From == "" || !h.explicitAction(roomID, event.From, connectionToken, nil, event.Type == "leave_room") {
 			http.Error(w, "unauthorized sender", http.StatusUnauthorized)
 			return
@@ -1001,9 +1110,11 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 		return
 	}
 
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
-	})
+	if !webSocketOriginAllowed(r, os.Getenv("EXTENSION_ORIGINS")) {
+		http.Error(w, "forbidden origin", http.StatusForbidden)
+		return
+	}
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 	if err != nil {
 		log.Printf("websocket accept failed: %v", err)
 		return
@@ -1022,14 +1133,14 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 	defer func() {
 		removed := h.removeWSClient(roomID, client)
 		if removed && !h.clientOnline(roomID, clientID) {
-			leave := wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: 3}
+			leave := wsEnvelope{Type: "peer_leave", Room: roomID, From: clientID, Protocol: protocolVersion}
 			if body, err := msgpack.Marshal(leave); err == nil {
 				h.broadcastWS(roomID, body)
 			}
 		}
 	}()
 
-	welcome := wsEnvelope{Type: "welcome", Room: roomID, From: "server", Protocol: 3}
+	welcome := wsEnvelope{Type: "welcome", Room: roomID, From: "server", Protocol: protocolVersion}
 	if body, err := msgpack.Marshal(welcome); err == nil {
 		client.events <- body
 	}
@@ -1052,7 +1163,7 @@ func (h *Hub) wsHandler(w http.ResponseWriter, r *http.Request, roomID string) {
 				return
 			}
 		case <-ticker.C:
-			ping := wsEnvelope{Type: "ping", Room: roomID, From: "server", Protocol: 3}
+			ping := wsEnvelope{Type: "ping", Room: roomID, From: "server", Protocol: protocolVersion}
 			body, err := msgpack.Marshal(ping)
 			if err != nil {
 				continue
@@ -1078,16 +1189,16 @@ func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *webso
 
 		var event wsEnvelope
 		if err := msgpack.Unmarshal(body, &event); err != nil {
-			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 3})
+			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: protocolVersion})
 			continue
 		}
 		if err := validateWSEvent(event, roomID, client.id); err != nil {
-			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 3, AckID: event.MsgID})
+			enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: protocolVersion, AckID: event.MsgID})
 			continue
 		}
 		if event.Type == "purge_self" || event.Type == "leave_room" {
 			if !h.explicitAction(roomID, client.id, "", client, event.Type == "leave_room") {
-				enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: 3})
+				enqueueWS(client, wsEnvelope{Type: "server_error", Room: roomID, From: "server", Protocol: protocolVersion})
 			}
 			if event.Type == "leave_room" {
 				return
@@ -1100,7 +1211,7 @@ func (h *Hub) readWS(ctx context.Context, cancel context.CancelFunc, conn *webso
 			ackType = "chunk_ack"
 		}
 		if event.MsgID != "" {
-			enqueueWS(client, wsEnvelope{Type: ackType, Room: roomID, From: "server", Protocol: 3, AckID: event.MsgID})
+			enqueueWS(client, wsEnvelope{Type: ackType, Room: roomID, From: "server", Protocol: protocolVersion, AckID: event.MsgID})
 		}
 		h.dispatchWS(roomID, event, body)
 		log.Printf("ws dispatch room=%s type=%s", roomID, event.Type)
@@ -1119,17 +1230,20 @@ func enqueueWS(client *Client, event wsEnvelope) {
 }
 
 func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
-	if event.Protocol != 3 {
+	if event.Protocol != protocolVersion {
 		return errors.New("invalid protocol")
 	}
 	if !validWSEventType(event.Type) {
 		return errors.New("invalid event type")
 	}
-	if event.Room != "" && event.Room != roomID {
+	if event.Room != roomID {
 		return errors.New("room mismatch")
 	}
 	if event.From != "" && event.From != clientID {
 		return errors.New("sender mismatch")
+	}
+	if event.From == "" {
+		return errors.New("missing sender")
 	}
 	if event.From != "" && !clientIDRe.MatchString(event.From) {
 		return errors.New("invalid sender")
@@ -1140,8 +1254,19 @@ func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
 	if requiresMsgID(event.Type) && event.MsgID == "" {
 		return errors.New("missing message id")
 	}
-	if len(event.MsgID) > 160 || len(event.AckID) > 160 || len(event.TransferID) > 160 || len(event.RotationID) > 160 || len(event.SenderKeyID) > 96 || len(event.RecipientKeyID) > 96 {
+	if len(event.MsgID) > 160 || len(event.AckID) > 160 || len(event.TransferID) > 160 || len(event.RotationID) > 160 || len(event.SenderKeyID) > 96 || len(event.RecipientKeyID) > 96 || event.KeyGeneration < 0 {
 		return errors.New("event identifier too long")
+	}
+	if (event.Type == "hello" || event.Type == "peer_hello" || requiresSignature(event.Type)) && !eventIDRe.MatchString(event.EventID) {
+		return errors.New("missing or invalid event id")
+	}
+	if len(event.Features) > 8 {
+		return errors.New("too many features")
+	}
+	for _, feature := range event.Features {
+		if len(feature) > 32 {
+			return errors.New("feature too long")
+		}
 	}
 	if event.Type == "hello" || event.Type == "peer_hello" {
 		if len(event.PublicKey) != 32 || len(event.SignPublicKey) != 32 || len(event.HelloMAC) != 32 || len(event.Signature) != 64 || event.SenderKeyID == "" {
@@ -1156,24 +1281,41 @@ func validateWSEvent(event wsEnvelope, roomID, clientID string) error {
 	if len(event.PublicKey) > 32 || len(event.SignPublicKey) > 32 || len(event.HelloMAC) > 32 || len(event.Signature) > 64 || len(event.Ciphertext) > maxBodyBytes {
 		return errors.New("binary field too large")
 	}
-	if event.Type == "chunk" && (event.Total <= 0 || event.Total > 4096 || event.Seq < 0 || event.Seq >= event.Total) {
+	if event.Type == "chunk" && (event.Total <= 0 || event.Total > maxChunkCount || event.Seq < 0 || event.Seq >= event.Total || len(event.Ciphertext) > maxChunkBytes) {
 		return errors.New("invalid chunk range")
+	}
+	if err := validateWSEventShape(event); err != nil {
+		return err
 	}
 	return nil
 }
 
 func validateSSEEvent(event inboundEvent) error {
-	if event.Protocol != 3 {
+	if event.Protocol != protocolVersion {
 		return errors.New("invalid protocol")
 	}
 	if !validEventType(event.Type) {
 		return errors.New("invalid event type")
 	}
+	if event.From == "" || !clientIDRe.MatchString(event.From) {
+		return errors.New("missing or invalid sender")
+	}
 	if requiresMsgID(event.Type) && event.MsgID == "" {
 		return errors.New("missing message id")
 	}
-	if len(event.MsgID) > 160 || len(event.AckID) > 160 || len(event.TransferID) > 160 || len(event.RotationID) > 160 || len(event.SenderKeyID) > 96 || len(event.RecipientKeyID) > 96 {
+	if len(event.MsgID) > 160 || len(event.AckID) > 160 || len(event.TransferID) > 160 || len(event.RotationID) > 160 || len(event.SenderKeyID) > 96 || len(event.RecipientKeyID) > 96 || event.KeyGeneration < 0 {
 		return errors.New("event identifier too long")
+	}
+	if (event.Type == "hello" || event.Type == "peer_hello" || requiresSignature(event.Type)) && !eventIDRe.MatchString(event.EventID) {
+		return errors.New("missing or invalid event id")
+	}
+	if len(event.Features) > 8 {
+		return errors.New("too many features")
+	}
+	for _, feature := range event.Features {
+		if len(feature) > 32 {
+			return errors.New("feature too long")
+		}
 	}
 	if event.Type == "hello" || event.Type == "peer_hello" {
 		if !validBase64Bytes(event.PublicKey, 32) || !validBase64Bytes(event.SignPublicKey, 32) || !validBase64Bytes(event.HelloMAC, 32) || !validBase64Bytes(event.Signature, 64) || event.SenderKeyID == "" {
@@ -1185,13 +1327,62 @@ func validateSSEEvent(event inboundEvent) error {
 	if !validOptionalBase64(event.Nonce, 32) || !validOptionalBase64(event.RosterHash, 64) || !validOptionalBase64(event.SealedKey, 256) {
 		return errors.New("invalid binary field")
 	}
-	if !validOptionalBase64(event.Ciphertext, maxBodyBytes) {
+	if !validOptionalBase64(event.Ciphertext, maxSSEBodyBytes) {
 		return errors.New("invalid ciphertext")
 	}
-	if event.Type == "chunk" && (event.Total <= 0 || event.Total > 4096 || event.Seq < 0 || event.Seq >= event.Total) {
+	if event.Type == "chunk" && (event.Total <= 0 || event.Total > maxChunkCount || event.Seq < 0 || event.Seq >= event.Total) {
 		return errors.New("invalid chunk range")
 	}
+	if err := validateSSEEventShape(event); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateWSEventShape(event wsEnvelope) error {
+	switch event.Type {
+	case "group_msg":
+		if len(event.Nonce) != 24 || len(event.Ciphertext) == 0 {
+			return errors.New("invalid group message")
+		}
+	case "private_msg":
+		if event.To == "" || len(event.Nonce) != 24 || len(event.Ciphertext) == 0 || len(event.PublicKey) != 32 || event.RecipientKeyID == "" {
+			return errors.New("invalid private message")
+		}
+	case "chunk":
+		if event.TransferID == "" || (event.MessageType != "group_msg" && event.MessageType != "private_msg") || len(event.Nonce) != 24 || len(event.Ciphertext) == 0 || len(event.Ciphertext) > maxChunkBytes {
+			return errors.New("invalid chunk")
+		}
+	case "key_prepare", "key_commit", "key_abort":
+		if event.RotationID == "" || event.NextEpoch != event.Epoch+1 || len(event.RosterHash) != 32 {
+			return errors.New("invalid key transition")
+		}
+	case "key_offer":
+		if event.To == "" || event.RotationID == "" || event.NextEpoch != event.Epoch+1 || len(event.RosterHash) != 32 || len(event.SealedKey) != 80 || event.RecipientKeyID == "" {
+			return errors.New("invalid key offer")
+		}
+	case "key_ready", "join_key_ready":
+		if event.To == "" || event.RotationID == "" || len(event.RosterHash) != 32 {
+			return errors.New("invalid key readiness")
+		}
+	case "join_key_offer":
+		if event.To == "" || event.RotationID == "" || event.NextEpoch <= 0 || event.Epoch != event.NextEpoch-1 || len(event.RosterHash) != 32 || len(event.SealedKey) != 80 || event.RecipientKeyID == "" {
+			return errors.New("invalid join key offer")
+		}
+	case "device_key_update":
+		if len(event.PublicKey) != 32 || len(event.SignPublicKey) != 32 || event.SenderKeyID == "" || event.KeyGeneration <= 0 {
+			return errors.New("invalid device key update")
+		}
+	}
+	return nil
+}
+
+func validateSSEEventShape(event inboundEvent) error {
+	wsEvent, err := event.toWS()
+	if err != nil {
+		return errors.New("invalid binary field")
+	}
+	return validateWSEventShape(wsEvent)
 }
 
 func validBase64Bytes(value string, size int) bool {
