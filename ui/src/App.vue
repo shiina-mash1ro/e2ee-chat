@@ -221,7 +221,7 @@
                 <n-scrollbar ref="messageScrollRef" class="messages">
                   <div class="message-stack">
                     <article
-                      v-for="message in messages"
+                      v-for="message in visibleMessages"
                       :key="message.id"
                       class="message"
                       :class="{ mine: message.mine, private: message.privateTo, system: message.system }"
@@ -462,6 +462,7 @@ const notice = ref("");
 const safetyCode = ref("");
 const connectionState = ref("未连接");
 const messages = ref([]);
+const pageMessagesVisible = ref(document.visibilityState === "visible" && document.hasFocus());
 const draft = ref("");
 const codeMode = ref(false);
 const messageScrollRef = ref(null);
@@ -605,6 +606,7 @@ const emojiList = [
 ];
 
 const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && transport.value));
+const visibleMessages = computed(() => (pageMessagesVisible.value ? messages.value : []));
 const selectedPeerOffline = computed(() => Boolean(selectedPeer.value && !peers.value.has(selectedPeer.value)));
 const canSubmit = computed(() => canSend.value && !selectedPeerOffline.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
 const canToggleCodeMode = computed(() => canSend.value && !selectedPeerOffline.value && !selectedFile.value);
@@ -644,11 +646,15 @@ onBeforeUnmount(() => {
   if (messageRetentionTimer) clearInterval(messageRetentionTimer);
   clearPendingAuthenticatedPeerEvents();
   window.removeEventListener("online", wakeWSRecovery);
+  window.removeEventListener("focus", handlePageFocus);
+  window.removeEventListener("blur", handlePageBlur);
   document.removeEventListener("visibilitychange", handleVisibilityRecovery);
   document.removeEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 });
 
 window.addEventListener("online", wakeWSRecovery);
+window.addEventListener("focus", handlePageFocus);
+window.addEventListener("blur", handlePageBlur);
 document.addEventListener("visibilitychange", handleVisibilityRecovery);
 document.addEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 
@@ -1153,7 +1159,25 @@ function wakeWSRecovery() {
 }
 
 function handleVisibilityRecovery() {
-  if (document.visibilityState === "visible") wakeWSRecovery();
+  if (document.visibilityState === "visible") {
+    if (document.hasFocus()) handlePageFocus();
+    wakeWSRecovery();
+  } else {
+    handlePageBlur();
+  }
+}
+
+function handlePageFocus() {
+  // Background tabs may throttle or suspend retention timers. Always prune
+  // against wall-clock time before making any messages visible again.
+  pageMessagesVisible.value = false;
+  pruneMessages(Date.now());
+  pageMessagesVisible.value = document.visibilityState === "visible";
+  if (pageMessagesVisible.value) scrollMessages();
+}
+
+function handlePageBlur() {
+  pageMessagesVisible.value = false;
 }
 
 function cancelWSRecovery(closeProbe = true) {

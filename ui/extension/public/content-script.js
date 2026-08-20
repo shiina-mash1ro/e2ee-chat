@@ -26,6 +26,15 @@
   let visible = true;
   let expanded = false;
   let size = { width: 390, height: 640 };
+  const pageHasFocus = () => document.visibilityState === "visible" && document.hasFocus();
+  const publishPageFocus = () => frame.contentWindow?.postMessage({
+    source: "e2ee-chat-host",
+    type: "page-focus",
+    value: pageHasFocus(),
+  }, "*");
+  addEventListener("focus", publishPageFocus);
+  addEventListener("blur", publishPageFocus);
+  document.addEventListener("visibilitychange", publishPageFocus);
   chrome.storage.local.get("widgetSize").then(({ widgetSize }) => {
     if (widgetSize?.width && widgetSize?.height) size = widgetSize;
   });
@@ -38,6 +47,7 @@
     if (event.source !== frame.contentWindow || event.data?.source !== "e2ee-chat-widget") return;
     if (event.data.type === "ready") {
       frame.contentWindow?.postMessage({ source: "e2ee-chat-host", type: "set-expanded", value: expanded }, "*");
+      publishPageFocus();
     }
     if (event.data.type === "expanded") {
       expanded = Boolean(event.data.value);
@@ -65,6 +75,6 @@
       delete globalThis.__e2eeChatWidgetController;
     }
   });
-  globalThis.__e2eeChatWidgetController = { toggleVisible() { visible = !visible; apply(); } };
+  globalThis.__e2eeChatWidgetController = { toggleVisible() { visible = !visible; apply(); publishPageFocus(); } };
   apply();
 })();

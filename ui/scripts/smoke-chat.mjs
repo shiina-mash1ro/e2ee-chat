@@ -423,6 +423,25 @@ async function assertChatWorks(pageA, pageB, pageC) {
     throw new Error("third client should not see private-message system hints");
   }
 
+  await pageA.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await pageA.locator(".message").first().waitFor({ state: "detached", timeout: 10000 });
+  if (await pageA.locator(".message").count()) {
+    throw new Error("messages remained visible after the page lost focus");
+  }
+  await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await pageA.getByText("private from A to B").waitFor({ timeout: 10000 });
+  await pageA.evaluate(() => {
+    const realNow = Date.now;
+    window.dispatchEvent(new Event("blur"));
+    Date.now = () => realNow() + 20 * 60 * 1000 + 1;
+    window.dispatchEvent(new Event("focus"));
+    Date.now = realNow;
+  });
+  await pageA.locator(".message").first().waitFor({ state: "detached", timeout: 10000 });
+  if (await pageA.locator(".message").count()) {
+    throw new Error("expired messages reappeared when the page regained focus");
+  }
+
   await pageA.getByRole("button", { name: "一键鸵鸟" }).click();
   await pageB.getByText("hello from A group").waitFor({ state: "detached", timeout: 10000 });
   await pageC.getByText("hello from A group").waitFor({ state: "detached", timeout: 10000 });

@@ -112,6 +112,11 @@ try {
   await second.locator(".message-text").filter({ hasText: "来自第一个扩展窗口" }).waitFor({ timeout: 10000 });
   const rendered = await second.locator(".message-text").last().textContent();
   if (rendered !== "来自第一个扩展窗口\n保留换行") throw new Error("message newline was not preserved");
+  await second.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await second.locator(".message").first().waitFor({ state: "detached", timeout: 10000 });
+  await second.locator(".empty").filter({ hasText: "消息已隐藏" }).waitFor();
+  await second.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await second.locator(".message-text").filter({ hasText: "来自第一个扩展窗口" }).waitFor({ timeout: 10000 });
 
   await first.close();
   await second.locator("#draft").fill("第二个窗口仍然在线");

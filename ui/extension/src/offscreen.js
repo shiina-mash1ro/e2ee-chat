@@ -116,6 +116,9 @@ function broadcast(type, payload = {}) {
 }
 
 function publicState() {
+  // Offscreen/background timers can be throttled. Every foreground snapshot
+  // must enforce retention using wall-clock time before exposing messages.
+  pruneMessages(Date.now(), false);
   return {
     roomId,
     invitePath,
@@ -797,11 +800,11 @@ function purgeMessages(sender) {
   publishState();
 }
 
-function pruneMessages(now = Date.now()) {
+function pruneMessages(now = Date.now(), shouldPublish = true) {
   const { retained, removed } = partitionRetainedMessages(messages, now);
   if (!removed.length) return;
   messages.splice(0, messages.length, ...retained);
-  publishState();
+  if (shouldPublish) publishState();
 }
 
 async function updateName(value) {
