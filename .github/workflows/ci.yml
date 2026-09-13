@@ -42,6 +42,10 @@ jobs:
         working-directory: ui
         run: npm run test:extension
 
+      - name: Test message visibility
+        working-directory: ui
+        run: npm run test:visibility
+
       - name: Build frontend and extension
         working-directory: ui
         run: npm run build:all
