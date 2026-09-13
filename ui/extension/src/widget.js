@@ -2,6 +2,8 @@ import "./widget.css";
 import { createClientChannel, ensureCore } from "./channel.js";
 import { installCustomCss } from "./custom-css.js";
 import { headsetIcon } from "./icons.js";
+import { partitionRetainedMessages } from "../../src/message-retention.js";
+import { observeMessageVisibility } from "../../src/message-visibility.js";
 
 const standalone = window.parent === window;
 const app = document.querySelector("#app");
@@ -14,6 +16,7 @@ let emojiOpen = false;
 let drawer = "";
 let notice = "";
 let channel;
+let pageMessagesVisible = standalone && document.visibilityState === "visible" && document.hasFocus();
 const urls = new Map();
 const emojis = [..."😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🫣 🤭 🫢 🤫 🤥 😶 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🤢 🤮 🤧 😷 🤒 🤕 👍 👎 👏 🙏 💪 👌 ✌️ 🤞 ❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🔥 🎉 ✅ ❌ 💡 📌 📎 🖼️ 📄 🔒 🔑 🚀 ☕ 🍻".split(" ")];
 
@@ -57,6 +60,7 @@ function render() {
 
 function renderMessages() {
   if (!state.roomId) return `<div class="empty"><p>尚未进入聊天室</p><button id="openLauncher">新建或加入房间</button><button id="openSettings">配置服务地址</button></div>`;
+  if (!pageMessagesVisible) return `<div class="empty">页面未聚焦，消息已隐藏</div>`;
   if (!state.messages.length) return `<div class="empty">${esc(state.status)}<br><span class="muted">所有窗口将显示同一聊天室</span></div>`;
   return state.messages.map((message) => {
     const privateClass = message.privateTo ? "private" : "";
@@ -129,6 +133,27 @@ function setExpanded(value) {
   render();
 }
 
+function setPageFocus(value) {
+  const focused = Boolean(value) && document.visibilityState === "visible";
+  if (!focused) document.querySelectorAll(".preview").forEach((overlay) => overlay.remove());
+  if (focused) {
+    const { retained } = partitionRetainedMessages(state.messages, Date.now());
+    state = { ...state, messages: retained };
+    channel?.send("heartbeat");
+  }
+  pageMessagesVisible = focused;
+  // Focus/pointer transitions must not replace the composer (and erase its
+  // draft or interrupt the click that is about to send it).
+  const messages = document.querySelector("#messages");
+  if (messages) {
+    syncUrls();
+    messages.innerHTML = renderMessages();
+    messages.querySelectorAll("[data-retry]").forEach((item) => item.onclick = () => channel.request("retry", { messageId: item.dataset.retry }).catch(showError));
+    messages.querySelectorAll("[data-preview]").forEach((item) => item.onclick = () => openPreview(item.dataset.preview));
+    messages.scrollTop = messages.scrollHeight;
+  }
+}
+
 function bindResize() {
   const handle = document.querySelector("#resize");
   if (!handle) return;
@@ -163,7 +188,23 @@ function openPreview(id) {
 function formatBytes(value) { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`; return `${(value / 1024 / 1024).toFixed(1)} MiB`; }
 function showError(error) { notice = error.message || String(error); render(); }
 
-addEventListener("message", (event) => { if (event.source === parent && event.data?.source === "e2ee-chat-host" && event.data.type === "set-expanded") setExpanded(event.data.value); });
+addEventListener("message", (event) => {
+  if (event.source !== parent || event.data?.source !== "e2ee-chat-host") return;
+  if (event.data.type === "set-expanded") setExpanded(event.data.value);
+  if (event.data.type === "page-focus") setPageFocus(event.data.value);
+});
+if (standalone) {
+  observeMessageVisibility(window, document, setPageFocus);
+} else {
+  // Parent focus events are not sufficient while its iframe owns focus.
+  addEventListener("blur", () => setPageFocus(false));
+  const refreshHostVisibility = () => {
+    if (document.visibilityState !== "visible") setPageFocus(false);
+    parent.postMessage({ source: "e2ee-chat-widget", type: "request-page-focus" }, "*");
+  };
+  addEventListener("focus", refreshHostVisibility);
+  document.addEventListener("visibilitychange", refreshHostVisibility);
+}
 addEventListener("pagehide", () => { channel?.close(); for (const url of urls.values()) URL.revokeObjectURL(url); });
 
 await ensureCore();
