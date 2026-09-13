@@ -142,7 +142,16 @@ function setPageFocus(value) {
     channel?.send("heartbeat");
   }
   pageMessagesVisible = focused;
-  render();
+  // Focus/pointer transitions must not replace the composer (and erase its
+  // draft or interrupt the click that is about to send it).
+  const messages = document.querySelector("#messages");
+  if (messages) {
+    syncUrls();
+    messages.innerHTML = renderMessages();
+    messages.querySelectorAll("[data-retry]").forEach((item) => item.onclick = () => channel.request("retry", { messageId: item.dataset.retry }).catch(showError));
+    messages.querySelectorAll("[data-preview]").forEach((item) => item.onclick = () => openPreview(item.dataset.preview));
+    messages.scrollTop = messages.scrollHeight;
+  }
 }
 
 function bindResize() {
