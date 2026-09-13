@@ -3,6 +3,7 @@ import { createClientChannel, ensureCore } from "./channel.js";
 import { installCustomCss } from "./custom-css.js";
 import { headsetIcon } from "./icons.js";
 import { partitionRetainedMessages } from "../../src/message-retention.js";
+import { observeMessageVisibility } from "../../src/message-visibility.js";
 
 const standalone = window.parent === window;
 const app = document.querySelector("#app");
@@ -134,6 +135,7 @@ function setExpanded(value) {
 
 function setPageFocus(value) {
   const focused = Boolean(value) && document.visibilityState === "visible";
+  if (!focused) document.querySelectorAll(".preview").forEach((overlay) => overlay.remove());
   if (focused) {
     const { retained } = partitionRetainedMessages(state.messages, Date.now());
     state = { ...state, messages: retained };
@@ -183,9 +185,16 @@ addEventListener("message", (event) => {
   if (event.data.type === "page-focus") setPageFocus(event.data.value);
 });
 if (standalone) {
-  addEventListener("focus", () => setPageFocus(true));
+  observeMessageVisibility(window, document, setPageFocus);
+} else {
+  // Parent focus events are not sufficient while its iframe owns focus.
   addEventListener("blur", () => setPageFocus(false));
-  document.addEventListener("visibilitychange", () => setPageFocus(document.visibilityState === "visible" && document.hasFocus()));
+  const refreshHostVisibility = () => {
+    if (document.visibilityState !== "visible") setPageFocus(false);
+    parent.postMessage({ source: "e2ee-chat-widget", type: "request-page-focus" }, "*");
+  };
+  addEventListener("focus", refreshHostVisibility);
+  document.addEventListener("visibilitychange", refreshHostVisibility);
 }
 addEventListener("pagehide", () => { channel?.close(); for (const url of urls.values()) URL.revokeObjectURL(url); });
 

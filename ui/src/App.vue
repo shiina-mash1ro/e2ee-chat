@@ -443,6 +443,7 @@ import { darkTheme } from "naive-ui";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { asBytes, createProtocolV4, PROTOCOL_VERSION } from "./protocol-v4.js";
 import { partitionRetainedMessages } from "./message-retention.js";
+import { observeMessageVisibility } from "./message-visibility.js";
 import { authenticatedEventReplayKey, signingIdentityForEvent } from "./authenticated-events.js";
 
 const roomId = ref("");
@@ -646,15 +647,16 @@ onBeforeUnmount(() => {
   if (messageRetentionTimer) clearInterval(messageRetentionTimer);
   clearPendingAuthenticatedPeerEvents();
   window.removeEventListener("online", wakeWSRecovery);
-  window.removeEventListener("focus", handlePageFocus);
-  window.removeEventListener("blur", handlePageBlur);
+  stopMessageVisibility();
   document.removeEventListener("visibilitychange", handleVisibilityRecovery);
   document.removeEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 });
 
 window.addEventListener("online", wakeWSRecovery);
-window.addEventListener("focus", handlePageFocus);
-window.addEventListener("blur", handlePageBlur);
+const stopMessageVisibility = observeMessageVisibility(window, document, (visible) => {
+  if (visible) handlePageFocus();
+  else handlePageBlur();
+});
 document.addEventListener("visibilitychange", handleVisibilityRecovery);
 document.addEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 
@@ -1160,7 +1162,6 @@ function wakeWSRecovery() {
 
 function handleVisibilityRecovery() {
   if (document.visibilityState === "visible") {
-    if (document.hasFocus()) handlePageFocus();
     wakeWSRecovery();
   } else {
     handlePageBlur();
@@ -1178,6 +1179,8 @@ function handlePageFocus() {
 
 function handlePageBlur() {
   pageMessagesVisible.value = false;
+  closeImagePreview();
+  finalizeImagePreviewClose();
 }
 
 function cancelWSRecovery(closeProbe = true) {

@@ -26,15 +26,43 @@
   let visible = true;
   let expanded = false;
   let size = { width: 390, height: 640 };
-  const pageHasFocus = () => document.visibilityState === "visible" && document.hasFocus();
+  let pointerInside = !matchMedia("(any-hover: hover) and (any-pointer: fine)").matches;
+  let focused = document.hasFocus();
+  let suspended = false;
+  const pageHasFocus = () => visible && pointerInside && focused && !suspended && document.visibilityState === "visible" && document.hasFocus();
   const publishPageFocus = () => frame.contentWindow?.postMessage({
     source: "e2ee-chat-host",
     type: "page-focus",
     value: pageHasFocus(),
   }, "*");
-  addEventListener("focus", publishPageFocus);
-  addEventListener("blur", publishPageFocus);
-  document.addEventListener("visibilitychange", publishPageFocus);
+  const privacyListeners = [];
+  const listen = (target, type, fn) => {
+    target.addEventListener(type, fn);
+    privacyListeners.push(() => target.removeEventListener(type, fn));
+  };
+  const enter = (event) => {
+    if (event.pointerType !== "mouse" && event.pointerType !== "touch") return;
+    if (pointerInside) return;
+    pointerInside = true;
+    publishPageFocus();
+  };
+  listen(document.documentElement, "pointerenter", enter);
+  listen(document, "pointermove", enter);
+  listen(document, "pointerdown", enter);
+  listen(document.documentElement, "pointerleave", (event) => {
+    if (event.pointerType !== "mouse") return;
+    pointerInside = false;
+    publishPageFocus();
+  });
+  listen(window, "focus", () => { focused = document.hasFocus(); publishPageFocus(); });
+  listen(window, "blur", () => {
+    // Focusing our iframe is not leaving the host browser window.
+    focused = document.hasFocus();
+    publishPageFocus();
+  });
+  listen(document, "visibilitychange", () => { focused = document.hasFocus(); publishPageFocus(); });
+  listen(window, "pagehide", () => { suspended = true; publishPageFocus(); });
+  listen(window, "pageshow", () => { suspended = false; focused = document.hasFocus(); publishPageFocus(); });
   chrome.storage.local.get("widgetSize").then(({ widgetSize }) => {
     if (widgetSize?.width && widgetSize?.height) size = widgetSize;
   });
@@ -45,6 +73,10 @@
   };
   addEventListener("message", (event) => {
     if (event.source !== frame.contentWindow || event.data?.source !== "e2ee-chat-widget") return;
+    if (event.data.type === "request-page-focus") {
+      focused = document.hasFocus();
+      publishPageFocus();
+    }
     if (event.data.type === "ready") {
       frame.contentWindow?.postMessage({ source: "e2ee-chat-host", type: "set-expanded", value: expanded }, "*");
       publishPageFocus();
@@ -71,6 +103,7 @@
       frame.contentWindow?.postMessage({ source: "e2ee-chat-host", type: "set-expanded", value: true }, "*");
     }
     if (message?.type === "widget-remove") {
+      privacyListeners.forEach((remove) => remove());
       host.remove();
       delete globalThis.__e2eeChatWidgetController;
     }
