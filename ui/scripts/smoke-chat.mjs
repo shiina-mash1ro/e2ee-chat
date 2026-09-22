@@ -1,4 +1,5 @@
 import { chromium } from "playwright";
+import { catalogs, supportedLocales } from "../src/i18n.js";
 
 const tinyPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
@@ -10,7 +11,11 @@ let recoveryInviteURL = "";
 
 const browser = await chromium.launch({ headless: true });
 
+// Existing behavioral assertions intentionally exercise the Chinese UI.
+const chineseContext = () => browser.newContext({ locale: "zh-CN" });
+
 try {
+  await runLanguageSmoke();
   await runPopupModeSmoke();
   await runFullLinkSmoke();
   await runSSERecoverySmoke();
@@ -21,8 +26,49 @@ try {
   await browser.close();
 }
 
+async function runLanguageSmoke() {
+  const context = await browser.newContext({ locale: "en-US" });
+  try {
+    const page = await context.newPage();
+    await page.goto(baseURL);
+    await page.getByRole("heading", { name: catalogs.en["web.title"], exact: true }).waitFor();
+    await page.locator(".join-code-form input").first().fill("I18NTEST");
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const language of supportedLocales) {
+      await page.locator(".home select.language-select").selectOption(language);
+      await page.getByRole("heading", { name: catalogs[language]["web.title"], exact: true }).waitFor();
+      const settings = await page.evaluate(() => ({ lang: document.documentElement.lang, dir: document.documentElement.dir }));
+      if (settings.lang !== language || settings.dir !== (language === "ar" ? "rtl" : "ltr")) throw new Error(`incorrect locale metadata: ${language}`);
+      if (await page.locator(".join-code-form input").first().inputValue() !== "I18NTEST") throw new Error("language change discarded home input");
+    }
+    await page.locator(".home select.language-select").selectOption("ja");
+    await page.reload();
+    await page.getByRole("heading", { name: catalogs.ja["web.title"], exact: true }).waitFor();
+    const other = await context.newPage();
+    await other.goto(baseURL);
+    await other.locator(".home select.language-select").selectOption("zh-CN");
+    await page.getByRole("heading", { name: catalogs["zh-CN"]["web.title"], exact: true }).waitFor();
+    await other.close();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.getByRole("switch", { name: "独立窗口模式" }).click();
+    await page.getByRole("button", { name: "创建大力房间", exact: true }).click();
+    await page.waitForURL(/\/r\/.+#k=.+/);
+    await enterName(page, "Language test");
+    await page.getByText("已连接", { exact: true }).waitFor();
+    const url = page.url();
+    const devices = await page.evaluate(() => Object.entries(sessionStorage).filter(([key]) => key.startsWith("e2ee-chat-device:")));
+    const draft = "草稿 preserved 日本語 العربية <not markup>";
+    await page.getByPlaceholder("输入消息").fill(draft);
+    await page.locator(".meta select.language-select").selectOption("en");
+    if (await page.getByPlaceholder(catalogs.en["web.messagePlaceholder"]).inputValue() !== draft || page.url() !== url) throw new Error("room changed or draft lost on language switch");
+    const after = await page.evaluate(() => Object.entries(sessionStorage).filter(([key]) => key.startsWith("e2ee-chat-device:")));
+    if (JSON.stringify(after) !== JSON.stringify(devices)) throw new Error("language switch changed device identity");
+    console.log({ mode: "i18n", languages: supportedLocales.length, persisted: true, draftPreserved: true });
+  } finally { await context.close(); }
+}
+
 async function runPopupModeSmoke() {
-  const context = await browser.newContext();
+const context = await chineseContext();
   await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(baseURL).origin });
   try {
     const opener = await context.newPage();
@@ -63,7 +109,7 @@ async function runPopupModeSmoke() {
     await context.close();
   }
 
-  const blockedContext = await browser.newContext();
+  const blockedContext = await chineseContext();
   await blockedContext.addInitScript(() => {
     window.open = () => null;
   });
@@ -85,7 +131,7 @@ async function runPopupModeSmoke() {
     await blockedContext.close();
   }
 
-  const failedContext = await browser.newContext();
+  const failedContext = await chineseContext();
   await failedContext.route("**/api/rooms/*/config", (route) => route.fulfill({ status: 500, body: "simulated failure" }));
   try {
     const page = await failedContext.newPage();
@@ -120,7 +166,7 @@ async function useSameTabMode(context) {
 }
 
 async function runMultiRoomIsolationSmoke() {
-  const context = await browser.newContext();
+  const context = await chineseContext();
   try {
     await useSameTabMode(context);
     const firstRoom = await context.newPage();
@@ -156,8 +202,8 @@ async function runMultiRoomIsolationSmoke() {
 }
 
 async function runKeyRotationSmoke() {
-  const senderContext = await browser.newContext();
-  const receiverContext = await browser.newContext();
+  const senderContext = await chineseContext();
+  const receiverContext = await chineseContext();
   try {
     await Promise.all([senderContext, receiverContext].map(useSameTabMode));
     const sender = await senderContext.newPage();
@@ -195,9 +241,9 @@ async function runKeyRotationSmoke() {
 }
 
 async function runFullLinkSmoke() {
-  const contextA = await browser.newContext();
-  const contextB = await browser.newContext();
-  const contextC = await browser.newContext();
+  const contextA = await chineseContext();
+  const contextB = await chineseContext();
+  const contextC = await chineseContext();
   try {
     await Promise.all([contextA, contextB, contextC].map(useSameTabMode));
     const pageA = await contextA.newPage();
@@ -234,8 +280,8 @@ async function runFullLinkSmoke() {
 }
 
 async function runSSERecoverySmoke() {
-  const fallbackContext = await browser.newContext();
-  const peerContext = await browser.newContext();
+  const fallbackContext = await chineseContext();
+  const peerContext = await chineseContext();
   try {
     await fallbackContext.addInitScript(() => {
       const NativeWebSocket = window.WebSocket;
@@ -290,9 +336,9 @@ async function runSSERecoverySmoke() {
 }
 
 async function runCodeSmoke() {
-  const contextA = await browser.newContext();
-  const contextB = await browser.newContext();
-  const contextC = await browser.newContext();
+  const contextA = await chineseContext();
+  const contextB = await chineseContext();
+  const contextC = await chineseContext();
   try {
     await Promise.all([contextA, contextB, contextC].map(useSameTabMode));
     const pageA = await contextA.newPage();

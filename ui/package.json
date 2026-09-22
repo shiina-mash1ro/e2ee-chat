@@ -13,7 +13,8 @@
     "smoke:extension": "node scripts/smoke-extension.mjs",
     "test:protocol": "node scripts/test-protocol-v4.mjs",
     "test:extension": "node --test scripts/test-extension-helpers.mjs",
-    "test:visibility": "node --test scripts/test-message-visibility.mjs"
+    "test:visibility": "node --test scripts/test-message-visibility.mjs",
+    "test:i18n": "node --test scripts/test-i18n.mjs"
   },
   "dependencies": {
     "@fortawesome/free-solid-svg-icons": "^7.3.1",

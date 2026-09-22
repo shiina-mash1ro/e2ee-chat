@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "إظهار محادثة الدعم"
+  },
+  "extensionDescription": {
+    "message": "يعرض محادثة دعم مؤقتة مشتركة في أسفل يمين الصفحة."
+  },
+  "greenExit": {
+    "message": "المخرج الأخضر"
+  }
+}

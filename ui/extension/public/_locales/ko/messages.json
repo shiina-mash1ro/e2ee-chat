@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "상담 채팅 표시"
+  },
+  "extensionDescription": {
+    "message": "페이지 오른쪽 아래에 공유 임시 상담 채팅을 표시합니다."
+  },
+  "greenExit": {
+    "message": "그린 출구"
+  }
+}

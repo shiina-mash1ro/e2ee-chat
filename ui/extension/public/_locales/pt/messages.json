@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "Mostrar chat de suporte"
+  },
+  "extensionDescription": {
+    "message": "Mostra um chat temporário compartilhado no canto inferior direito da página."
+  },
+  "greenExit": {
+    "message": "Saída verde"
+  }
+}

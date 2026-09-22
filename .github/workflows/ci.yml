@@ -46,6 +46,10 @@ jobs:
         working-directory: ui
         run: npm run test:visibility
 
+      - name: Test translations
+        working-directory: ui
+        run: npm run test:i18n
+
       - name: Build frontend and extension
         working-directory: ui
         run: npm run build:all

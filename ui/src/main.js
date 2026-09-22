@@ -24,6 +24,9 @@ import {
 } from "naive-ui";
 import App from "./App.vue";
 import "./style.css";
+import { initLocale } from "./i18n.js";
+
+await initLocale();
 
 const app = createApp(App);
 

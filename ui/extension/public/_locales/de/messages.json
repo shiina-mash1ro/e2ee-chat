@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "Support-Chat anzeigen"
+  },
+  "extensionDescription": {
+    "message": "Zeigt einen gemeinsamen temporären Support-Chat unten rechts auf der Seite an."
+  },
+  "greenExit": {
+    "message": "Grüner Ausgang"
+  }
+}

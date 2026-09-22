@@ -1,42 +1,46 @@
 import "./base.css";
 import { normalizeChatOrigin, permissionPattern, validateChatOrigin } from "./origin.js";
-import { MAX_CUSTOM_CSS_BYTES, validateCustomCss } from "./custom-css.js";
+import { validateCustomCss } from "./custom-css.js";
 
+import { initLocale, getLocalePreference, localeOptions, onLocaleChange, setLocale, t } from "../../src/i18n.js";
+
+await initLocale();
 const app = document.querySelector("#app");
 app.innerHTML = `
   <section class="card" style="max-width:680px;margin:40px auto">
-    <h1>显示客服 · 设置</h1>
-    <p class="muted">首次使用必须填写聊天服务地址。扩展不会预置服务器。</p>
+    <label>${t("ext.language")}<select id="language">${localeOptions.map(({ value, label }) => `<option value="${value}">${label}</option>`).join("")}</select></label>
+    <h1>${t("ext.options.title")}</h1>
+    <p class="muted">${t("ext.options.intro")}</p>
     <div id="notice" class="notice hidden"></div>
-    <label>聊天服务地址
+    <label>${t("ext.options.origin")}
       <input id="origin" inputmode="url" autocomplete="url" placeholder="https://chat.example.com">
     </label>
     <div class="row">
-      <button id="save" class="primary">验证、保存并授权</button>
-      <button id="clear" class="danger">清除地址</button>
+      <button id="save" class="primary">${t("ext.options.save")}</button>
+      <button id="clear" class="danger">${t("ext.options.clear")}</button>
     </div>
     <hr style="margin:24px 0;border:0;border-top:1px solid #dce3ec">
-    <h2>快捷键</h2>
-    <p>显示客服：<strong id="showShortcut">未绑定</strong></p>
-    <p>绿色出口：<strong id="shortcut">未绑定</strong></p>
-    <button id="shortcuts">打开浏览器快捷键设置</button>
-    <label>绿色出口执行内容
-      <select id="panicAction"><option value="wipe">紧急清除（默认）</option><option value="uninstall">静默卸载扩展</option></select>
+    <h2>${t("ext.options.shortcuts")}</h2>
+    <p><span>${t("ext.brand")}</span>: <strong id="showShortcut">${t("ext.options.unbound")}</strong></p>
+    <p><span>${t("ext.options.panicShortcut")}</span>: <strong id="shortcut">${t("ext.options.unbound")}</strong></p>
+    <button id="shortcuts">${t("ext.options.openShortcuts")}</button>
+    <label>${t("ext.options.panicAction")}
+      <select id="panicAction"><option value="wipe">${t("ext.options.panicWipe")}</option><option value="uninstall">${t("ext.options.panicUninstall")}</option></select>
     </label>
-    <p class="muted">绿色出口快捷键或下方按钮都需要在 3 秒内触发两次。卸载前也会尽力退出房间并清除临时数据。</p>
-    <button id="panic" class="danger">绿色出口：清除临时数据</button>
+    <p class="muted">${t("ext.options.panicHint")}</p>
+    <button id="panic" class="danger">${t("ext.options.panicClear")}</button>
     <hr style="margin:24px 0;border:0;border-top:1px solid #dce3ec">
-    <h2>浏览器安全 DNS</h2>
-    <p class="muted">聊天连接遵循浏览器或操作系统的 DNS 设置。扩展无法读取或强制指定 DoH/DoT 状态。</p>
-    <button id="secureDns">打开浏览器安全 DNS 设置</button>
+    <h2>${t("ext.options.dnsTitle")}</h2>
+    <p class="muted">${t("ext.options.dnsHint")}</p>
+    <button id="secureDns">${t("ext.options.openDns")}</button>
     <hr style="margin:24px 0;border:0;border-top:1px solid #dce3ec">
-    <h2>聊天界面 CSS</h2>
-    <p class="muted">导入的 CSS 只作用于聊天组件和独立聊天窗口，最大 100 KiB。设置页始终保持默认样式，便于恢复。</p>
+    <h2>${t("ext.options.cssTitle")}</h2>
+    <p class="muted">${t("ext.options.cssHint")}</p>
     <input id="cssFile" type="file" accept=".css,text/css">
-    <p id="cssStatus" class="muted">未导入</p>
-    <button id="clearCss">恢复默认聊天样式</button>
+    <p id="cssStatus" class="muted">${t("ext.options.notImported")}</p>
+    <button id="clearCss">${t("ext.options.clearCss")}</button>
     <label style="display:flex;grid-template-columns:auto 1fr;align-items:center;margin-top:22px">
-      <input id="notifications" type="checkbox" style="width:auto"> 每条收到的消息显示系统通知
+      <input id="notifications" type="checkbox" style="width:auto"> ${t("ext.options.notifications")}
     </label>
   </section>`;
 
@@ -45,8 +49,16 @@ const notice = document.querySelector("#notice");
 const notifications = document.querySelector("#notifications");
 const panicAction = document.querySelector("#panicAction");
 const panicButton = document.querySelector("#panic");
+let noticeSource = "";
+let showShortcut = "", panicShortcut = "", customCssName = "", customCssBytes = 0;
+function refreshMetadata() {
+  document.querySelector("#showShortcut").textContent = showShortcut || t("ext.options.unbound");
+  document.querySelector("#shortcut").textContent = panicShortcut || t("ext.options.unbound");
+  document.querySelector("#cssStatus").textContent = customCssName ? `${customCssName} (${customCssBytes} bytes)` : t("ext.options.notImported");
+}
 const show = (text, error = false) => {
-  notice.textContent = text;
+  noticeSource = text;
+  notice.textContent = t(text);
   notice.classList.toggle("hidden", !text);
   notice.style.background = error ? "#fff0f2" : "#e9f8f1";
   notice.style.color = error ? "#a51d36" : "#116343";
@@ -59,14 +71,16 @@ async function load() {
   notifications.checked = Boolean(local.notificationsEnabled);
   panicAction.value = local.panicAction === "uninstall" ? "uninstall" : "wipe";
   updatePanicLabel();
-  document.querySelector("#cssStatus").textContent = local.customCssName ? `${local.customCssName}（${local.customCssBytes || 0} bytes）` : "未导入";
+  customCssName = local.customCssName || "";
+  customCssBytes = local.customCssBytes || 0;
   const commands = await chrome.commands.getAll();
-  document.querySelector("#showShortcut").textContent = commands.find((item) => item.name === "_execute_action")?.shortcut || "未绑定";
-  document.querySelector("#shortcut").textContent = commands.find((item) => item.name === "panic-action")?.shortcut || "未绑定";
+  showShortcut = commands.find((item) => item.name === "_execute_action")?.shortcut || "";
+  panicShortcut = commands.find((item) => item.name === "panic-action")?.shortcut || "";
+  refreshMetadata();
 }
 
 function updatePanicLabel() {
-  panicButton.textContent = panicAction.value === "uninstall" ? "绿色出口：静默卸载" : "绿色出口：清除临时数据";
+  panicButton.textContent = panicAction.value === "uninstall" ? t("ext.options.panicUninstallButton") : t("ext.options.panicClear");
 }
 
 document.querySelector("#save").addEventListener("click", async () => {
@@ -76,12 +90,12 @@ document.querySelector("#save").addEventListener("click", async () => {
     const pattern = permissionPattern(chatOrigin);
     const alreadyGranted = await chrome.permissions.contains({ origins: [pattern] });
     const granted = alreadyGranted || await chrome.permissions.request({ origins: [pattern] });
-    if (!granted) throw new Error("未授予该服务地址的访问权限");
+    if (!granted) throw new Error(t("ext.errors.permissionDenied"));
     try {
       const { info } = await validateChatOrigin(chatOrigin, 5000);
       await chrome.storage.sync.set({ chatOrigin, chatOriginValidation: { extensionApi: info.extensionApi, protocol: info.protocol, build: info.build, checkedAt: Date.now() } });
       originInput.value = chatOrigin;
-      show(`服务验证成功（${info.build}）。当前聊天室继续使用原地址，下次进入房间时生效。`);
+      show(t("ext.options.validated", { build: info.build }));
     } catch (error) {
       if (!alreadyGranted) await chrome.permissions.remove({ origins: [pattern] }).catch(() => {});
       throw error;
@@ -93,7 +107,7 @@ document.querySelector("#save").addEventListener("click", async () => {
 document.querySelector("#clear").addEventListener("click", async () => {
   await chrome.storage.sync.remove(["chatOrigin", "chatOriginValidation"]);
   originInput.value = "";
-  show("已清除服务地址。当前临时会话不会被强制中断。");
+  show(t("ext.options.cleared"));
 });
 document.querySelector("#shortcuts").addEventListener("click", () => {
   chrome.tabs.create({ url: navigator.userAgent.includes("Edg/") ? "edge://extensions/shortcuts" : "chrome://extensions/shortcuts" });
@@ -107,15 +121,15 @@ panicAction.addEventListener("change", async () => {
 panicButton.addEventListener("click", async () => {
   try {
     const response = await chrome.runtime.sendMessage({ type: "trigger-panic" });
-    if (!response?.ok) throw new Error(response?.error || "绿色出口执行失败");
+    if (!response?.ok) throw new Error(response?.error || t("ext.errors.panicFailed"));
     if (response.armed) {
-      panicButton.textContent = response.action === "uninstall" ? "3 秒内再次点击以卸载" : "3 秒内再次点击以清除";
+      panicButton.textContent = response.action === "uninstall" ? t("ext.options.confirmUninstall") : t("ext.options.confirmClear");
       setTimeout(updatePanicLabel, 3100);
     } else {
       originInput.value = "";
       panicAction.value = "wipe";
       updatePanicLabel();
-      show("临时会话、扩展存储、缓存和站点权限已清除。");
+      show(t("ext.options.panicDone"));
     }
   } catch (error) {
     show(error.message || String(error), true);
@@ -127,7 +141,7 @@ document.querySelector("#secureDns").addEventListener("click", async () => {
   try {
     await chrome.tabs.create({ url: target });
   } catch {
-    show(`浏览器阻止了内部设置页，请手动打开 ${target}`, true);
+    show(t("ext.errors.internalPage", { target }), true);
   }
 });
 document.querySelector("#cssFile").addEventListener("change", async (event) => {
@@ -136,8 +150,10 @@ document.querySelector("#cssFile").addEventListener("change", async (event) => {
   try {
     const css = validateCustomCss(await file.text(), file.size, file.name);
     await chrome.storage.local.set({ customCss: css, customCssName: file.name, customCssBytes: file.size });
-    document.querySelector("#cssStatus").textContent = `${file.name}（${file.size} bytes）`;
-    show("自定义 CSS 已应用到所有聊天窗口。");
+    customCssName = file.name;
+    customCssBytes = file.size;
+    refreshMetadata();
+    show(t("ext.options.cssApplied"));
   } catch (error) {
     show(error.message || String(error), true);
   } finally {
@@ -146,7 +162,38 @@ document.querySelector("#cssFile").addEventListener("change", async (event) => {
 });
 document.querySelector("#clearCss").addEventListener("click", async () => {
   await chrome.storage.local.remove(["customCss", "customCssName", "customCssBytes"]);
-  document.querySelector("#cssStatus").textContent = "未导入";
-  show("聊天界面已恢复默认样式。");
+  customCssName = "";
+  customCssBytes = 0;
+  refreshMetadata();
+  show(t("ext.options.cssCleared"));
 });
 load().catch((error) => show(error.message || String(error), true));
+
+const languageSelect = document.querySelector("#language");
+const staticText = [];
+const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
+while (walker.nextNode()) {
+  const node = walker.currentNode;
+  if (!node.parentElement.closest("#notice, #cssStatus, #showShortcut, #shortcut, #panic, #language") && node.nodeValue.trim()) {
+    staticText.push([node, node.nodeValue]);
+  }
+}
+languageSelect.value = getLocalePreference();
+languageSelect.addEventListener("change", (event) => setLocale(event.target.value));
+function refreshLanguage() {
+  document.title = t("ext.options.title");
+  languageSelect.value = getLocalePreference();
+  languageSelect.querySelector('option[value="auto"]').textContent = `🌐 ${t("i18n.auto")}`;
+  // Update labels in place so unsaved settings, file inputs, focus and handlers survive.
+  for (const [node, original] of staticText) node.nodeValue = original.replace(original.trim(), t(original.trim()));
+  notice.textContent = t(noticeSource);
+  for (const node of app.querySelectorAll("[placeholder], [aria-label], [title]")) {
+    for (const attr of ["placeholder", "aria-label", "title"]) {
+      if (node.hasAttribute(attr)) node.setAttribute(attr, t(node.getAttribute(attr)));
+    }
+  }
+  updatePanicLabel();
+  refreshMetadata();
+}
+onLocaleChange(refreshLanguage);
+refreshLanguage();

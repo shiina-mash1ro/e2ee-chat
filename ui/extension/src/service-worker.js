@@ -1,4 +1,6 @@
 const OFFSCREEN_URL = "offscreen.html";
+import { initLocale, t } from "../../src/i18n.js";
+const localeReady = initLocale();
 let creatingOffscreen = null;
 let lastWidgetTabId = null;
 const PANIC_WINDOW_MS = 3000;
@@ -11,7 +13,7 @@ async function ensureOffscreen() {
     creatingOffscreen = chrome.offscreen.createDocument({
       url: OFFSCREEN_URL,
       reasons: ["WORKERS", "BLOBS"],
-      justification: "运行共享的临时聊天连接、加密 Worker 与文件对象。",
+      justification: t("core.panic.justification"),
     }).finally(() => { creatingOffscreen = null; });
   }
   await creatingOffscreen;
@@ -24,7 +26,7 @@ async function activeTab() {
 
 async function showWidget(expand = false) {
   const tab = await activeTab();
-  if (!tab?.id) throw new Error("找不到当前页面");
+  if (!tab?.id) throw new Error(t("core.error.noActivePage"));
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content-script.js"] });
     lastWidgetTabId = tab.id;
@@ -49,8 +51,8 @@ chrome.commands.onCommand.addListener(async (command) => {
     await chrome.notifications.create("e2ee-chat-panic-armed", {
       type: "basic",
       iconUrl: chrome.runtime.getURL("chat.svg"),
-      title: "绿色出口待确认",
-      message: `请在 3 秒内再次按下快捷键以${result.action === "uninstall" ? "卸载扩展" : "清除临时数据"}`,
+      title: t("core.panic.title"),
+      message: t("core.panic.confirm", { action: result.action === "uninstall" ? t("core.panic.uninstall") : t("core.panic.wipe") }),
       priority: 2,
     });
   }
@@ -118,6 +120,7 @@ chrome.runtime.onInstalled.addListener(async ({ reason }) => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const run = async () => {
+    await localeReady;
     switch (message?.type) {
       case "ensure-core":
         await ensureOffscreen();
@@ -158,8 +161,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.notifications.create(id, {
           type: "basic",
           iconUrl: chrome.runtime.getURL("chat.svg"),
-          title: "您收到一条信息",
-          message: message.message || "新消息",
+          title: t("core.notification.received"),
+          message: message.message || t("core.notification.newMessage"),
           priority: 2,
         });
         return { ok: true, id };

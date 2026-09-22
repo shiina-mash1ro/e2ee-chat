@@ -2,6 +2,7 @@ node_modules/
 
 dist/
 output/
+.playwright-cli/
 server/static/
 server/dist/
 

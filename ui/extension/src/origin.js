@@ -1,15 +1,16 @@
 export const EXTENSION_INFO_PATH = "/api/extension-info";
 export const EXTENSION_API_VERSION = 1;
 export const CHAT_PROTOCOL_VERSION = 4;
+import { t } from "../../src/i18n.js";
 
 export function normalizeChatOrigin(value) {
   const url = new URL(String(value || "").trim());
   const local = ["localhost", "127.0.0.1"].includes(url.hostname);
   if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
-    throw new Error("只能填写不含路径、查询或账号信息的站点地址");
+    throw new Error(t("core.error.originShape"));
   }
   if (url.protocol !== "https:" && !(local && url.protocol === "http:")) {
-    throw new Error("服务地址必须使用 HTTPS；仅本机开发地址可使用 HTTP");
+    throw new Error(t("core.error.originHttps"));
   }
   return url.origin;
 }
@@ -21,7 +22,7 @@ export function permissionPattern(origin) {
 
 export function assertExtensionInfo(value) {
   if (!value || value.app !== "e2ee-chat" || value.extensionApi !== EXTENSION_API_VERSION || value.protocol !== CHAT_PROTOCOL_VERSION || typeof value.build !== "string" || !value.build) {
-    throw new Error("该地址不是兼容的 E2EE Chat 服务");
+    throw new Error(t("core.error.incompatibleService"));
   }
   return value;
 }
@@ -37,10 +38,10 @@ export async function validateChatOrigin(origin, timeoutMs = 3000) {
       signal: controller.signal,
       headers: { Accept: "application/json" },
     });
-    if (!response.ok) throw new Error(`服务检查失败：HTTP ${response.status}`);
+    if (!response.ok) throw new Error(t("core.error.originCheck", { status: response.status }));
     return { origin: normalized, info: assertExtensionInfo(await response.json()) };
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error("服务检查超时");
+    if (error?.name === "AbortError") throw new Error(t("core.error.originTimeout"));
     throw error;
   } finally {
     clearTimeout(timer);

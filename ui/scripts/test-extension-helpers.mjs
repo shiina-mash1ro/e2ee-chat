@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setLocale } from "../src/i18n.js";
+await setLocale("zh-CN");
 import {
   assertExtensionInfo,
   normalizeChatOrigin,

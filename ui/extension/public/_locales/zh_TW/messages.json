@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "顯示客服"
+  },
+  "extensionDescription": {
+    "message": "在目前頁面右下角顯示共用的臨時客服聊天視窗。"
+  },
+  "greenExit": {
+    "message": "綠色出口"
+  }
+}

@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "显示客服",
+  "name": "__MSG_extensionName__",
+  "default_locale": "en",
   "version": "0.1.1",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx4w8sYnT4bR6RtgcnFoaCiizXjLmR5ALvkDnH1h10TuoUyBvWRXjW2uGcV8iVKKog2H+37hu8nVi65G8JPT7/BWdMm5yQEBaAddFf8t4E31fohAFe4KXp8Z4deAwKxyCVQoyDaJgwgNt0DyiDP+Ynt+uF/Q2sEqUKK5WiMXW1dDsjIWSK0DPH6Gkh8Qs7CgK9MA58D4zoMPUp5pmH0n5H9IhaYq6pwQ6ILIyW90hNOZEjZ1pWC3T2SMPElBF+mgzJLEMdNosnOHzDWXtlsbanu6zOTUFmzUAe6Wb55YJCy/YMCyBHg8JJv68POb4fIl+zNi55RuBs2Y6gatttXDV6QIDAQAB",
-  "description": "在当前页面右下角显示共享的临时客服聊天窗口。",
+  "description": "__MSG_extensionDescription__",
   "minimum_chrome_version": "116",
   "permissions": ["activeTab", "scripting", "storage", "offscreen", "notifications"],
   "optional_host_permissions": [
@@ -16,12 +17,12 @@
     "type": "module"
   },
   "action": {
-    "default_title": "显示客服"
+    "default_title": "__MSG_extensionName__"
   },
   "options_page": "options.html",
   "commands": {
     "panic-action": {
-      "description": "绿色出口"
+      "description": "__MSG_greenExit__"
     }
   },
   "web_accessible_resources": [

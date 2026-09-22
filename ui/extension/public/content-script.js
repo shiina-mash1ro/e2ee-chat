@@ -9,7 +9,7 @@
   const shadow = host.attachShadow({ mode: "closed" });
   const frame = document.createElement("iframe");
   frame.src = chrome.runtime.getURL("widget.html");
-  frame.title = "显示客服";
+  frame.title = chrome.i18n.getMessage("extensionName");
   frame.allow = "clipboard-read; clipboard-write";
   frame.style.cssText = "border:0;width:100%;height:100%;display:block;background:transparent";
 
@@ -73,6 +73,7 @@
   };
   addEventListener("message", (event) => {
     if (event.source !== frame.contentWindow || event.data?.source !== "e2ee-chat-widget") return;
+    if (event.data.type === "title" && typeof event.data.value === "string") frame.title = event.data.value.slice(0, 128);
     if (event.data.type === "request-page-focus") {
       focused = document.hasFocus();
       publishPageFocus();
