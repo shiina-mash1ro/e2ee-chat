@@ -15,6 +15,7 @@ const browser = await chromium.launch({ headless: true });
 const chineseContext = () => browser.newContext({ locale: "zh-CN" });
 
 try {
+  await runPrivacySmoke();
   await runLanguageSmoke();
   await runPopupModeSmoke();
   await runFullLinkSmoke();
@@ -26,6 +27,71 @@ try {
   await browser.close();
 }
 
+async function openPreferences(page) {
+  await page.locator('.settings-trigger').click();
+  await page.locator('.preferences-dialog').waitFor();
+}
+async function closePreferences(page) {
+  await page.locator('.preferences-dialog .n-base-close').click();
+  await page.locator('.preferences-dialog').waitFor({ state: 'hidden' });
+}
+
+async function runPrivacySmoke() {
+  const context = await chineseContext();
+  try {
+    const page = await context.newPage();
+    await page.goto(baseURL);
+    await openPreferences(page);
+    const toggle = page.getByRole('switch', { name: '增强隐藏', exact: true });
+    if (await toggle.getAttribute('aria-checked') !== 'false') throw new Error('privacy must default off');
+    await toggle.click();
+    const dialog = page.locator('.privacy-settings');
+    if (!await dialog.getByRole('button', { name: '保存并启用' }).isDisabled()) throw new Error('trial required');
+    const gesture = async (points = [[320,180],[960,180],[960,540],[320,540]]) => {
+      await page.mouse.move(...points[0]); await page.mouse.down();
+      for (const point of points.slice(1)) await page.mouse.move(...point, { steps: 4 });
+      await page.mouse.up();
+    };
+    await dialog.getByRole('button', { name: '试用', exact: true }).click();
+    await page.locator('.privacy-screen').waitFor();
+    await gesture();
+    await dialog.getByRole('button', { name: '保存并启用' }).click();
+    await page.reload();
+    await openPreferences(page);
+    if (await toggle.getAttribute('aria-checked') !== 'true') throw new Error('privacy preference not persisted');
+    await page.getByRole('switch', { name: '独立窗口模式' }).click();
+    await closePreferences(page);
+    await page.getByRole('button', { name: '创建大力房间', exact: true }).click();
+    await page.waitForURL(/\/r\/.+#k=.+/);
+    await enterName(page, 'Privacy test');
+    await page.getByText('已连接', { exact: true }).waitFor();
+    if (await page.locator('.privacy-screen').count()) throw new Error('room initially locked');
+    await page.getByPlaceholder('输入消息').fill('preserved draft');
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await page.locator('.privacy-screen').waitFor();
+    if (!await page.locator('#app').evaluate(el => el.inert && el.getAttribute('aria-hidden') === 'true')) throw new Error('underlying UI accessible');
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.mouse.click(320,180);
+    await gesture([[320,180],[320,540]]);
+    if (!await page.locator('.privacy-screen').isVisible()) throw new Error('wrong gesture unlocked');
+    await gesture();
+    await page.locator('.privacy-screen').waitFor({ state: 'detached' });
+    if (await page.getByPlaceholder('输入消息').inputValue() !== 'preserved draft') throw new Error('draft lost');
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+    await page.locator('.privacy-screen').waitFor();
+    await page.reload();
+    await page.getByText('已连接', { exact: true }).waitFor();
+    if (await page.locator('.privacy-screen').count()) throw new Error('refresh starts locked');
+    console.log({ mode: 'privacy', trial: true, gestureUnlock: true, draftPreserved: true });
+  } finally { await context.close(); }
+  const mobile = await browser.newContext({ locale: 'zh-CN', isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } });
+  try {
+    const page = await mobile.newPage(); await page.goto(baseURL);
+    await page.getByRole('heading').first().waitFor();
+    if (await page.locator('.privacy-controls').count()) throw new Error('enhanced privacy offered on touch device');
+  } finally { await mobile.close(); }
+}
+
 async function runLanguageSmoke() {
   const context = await browser.newContext({ locale: "en-US" });
   try {
@@ -34,23 +100,27 @@ async function runLanguageSmoke() {
     await page.getByRole("heading", { name: catalogs.en["web.title"], exact: true }).waitFor();
     await page.locator(".join-code-form input").first().fill("I18NTEST");
     await page.setViewportSize({ width: 390, height: 844 });
+    await openPreferences(page);
     for (const language of supportedLocales) {
-      await page.locator(".home select.language-select").selectOption(language);
+      await page.locator(".preferences-dialog select.language-select").selectOption(language);
       await page.getByRole("heading", { name: catalogs[language]["web.title"], exact: true }).waitFor();
       const settings = await page.evaluate(() => ({ lang: document.documentElement.lang, dir: document.documentElement.dir }));
       if (settings.lang !== language || settings.dir !== (language === "ar" ? "rtl" : "ltr")) throw new Error(`incorrect locale metadata: ${language}`);
       if (await page.locator(".join-code-form input").first().inputValue() !== "I18NTEST") throw new Error("language change discarded home input");
     }
-    await page.locator(".home select.language-select").selectOption("ja");
+    await page.locator(".preferences-dialog select.language-select").selectOption("ja");
     await page.reload();
     await page.getByRole("heading", { name: catalogs.ja["web.title"], exact: true }).waitFor();
     const other = await context.newPage();
     await other.goto(baseURL);
-    await other.locator(".home select.language-select").selectOption("zh-CN");
+    await openPreferences(other);
+    await other.locator(".preferences-dialog select.language-select").selectOption("zh-CN");
     await page.getByRole("heading", { name: catalogs["zh-CN"]["web.title"], exact: true }).waitFor();
     await other.close();
     await page.setViewportSize({ width: 1280, height: 900 });
+    await openPreferences(page);
     await page.getByRole("switch", { name: "独立窗口模式" }).click();
+    await closePreferences(page);
     await page.getByRole("button", { name: "创建大力房间", exact: true }).click();
     await page.waitForURL(/\/r\/.+#k=.+/);
     await enterName(page, "Language test");
@@ -73,16 +143,19 @@ const context = await chineseContext();
   try {
     const opener = await context.newPage();
     await opener.goto(baseURL, { waitUntil: "domcontentloaded" });
+    await openPreferences(opener);
     const popupSwitch = opener.getByRole("switch", { name: "独立窗口模式" });
     if (await popupSwitch.getAttribute("aria-checked") !== "true") {
       throw new Error("popup mode should default to enabled");
     }
     await popupSwitch.click();
     await opener.reload({ waitUntil: "domcontentloaded" });
+    await openPreferences(opener);
     if (await opener.getByRole("switch", { name: "独立窗口模式" }).getAttribute("aria-checked") !== "false") {
       throw new Error("disabled popup mode was not persisted");
     }
     await opener.getByRole("switch", { name: "独立窗口模式" }).click();
+    await closePreferences(opener);
 
     const popupPromise = opener.waitForEvent("popup");
     await opener.getByRole("button", { name: "创建大力房间" }).click();
@@ -101,6 +174,7 @@ const context = await chineseContext();
     await invalidPreferencePage.goto(baseURL, { waitUntil: "domcontentloaded" });
     await invalidPreferencePage.evaluate(() => localStorage.setItem("e2ee-chat-popup-mode", "invalid"));
     await invalidPreferencePage.reload({ waitUntil: "domcontentloaded" });
+    await openPreferences(invalidPreferencePage);
     if (await invalidPreferencePage.getByRole("switch", { name: "独立窗口模式" }).getAttribute("aria-checked") !== "true") {
       throw new Error("invalid popup preference did not fall back to enabled");
     }

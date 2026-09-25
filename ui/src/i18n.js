@@ -4,6 +4,7 @@ import { CORE_LOCALES as core } from "./locales/core.js";
 import errorsA from "./locales/errors-a.js";
 import errorsB from "./locales/errors-b.js";
 import common from "./locales/common.js";
+import privacy from "./locales/privacy.js";
 
 export const LOCALE_STORAGE_KEY = "e2ee-chat-locale";
 export const supportedLocales = ["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "pt", "ru", "ar", "hi"];
@@ -17,7 +18,7 @@ export const localeOptions = [
   { value: "ar", label: "العربية" }, { value: "hi", label: "हिन्दी" },
 ];
 export const catalogs = Object.fromEntries(supportedLocales.map((locale) => [locale, {
-  ...web[locale], ...extension[locale], ...core[locale], ...errorsA[locale], ...errorsB[locale], ...common[locale],
+  ...web[locale], ...extension[locale], ...core[locale], ...errorsA[locale], ...errorsB[locale], ...common[locale], ...privacy[locale],
 }]));
 
 export function normalizeLocale(value) {

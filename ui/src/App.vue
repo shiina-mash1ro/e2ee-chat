@@ -1,4 +1,5 @@
 <template>
+  <PrivacyGuard ref="privacyGuard" :room-active="Boolean(roomId)" :dark="darkMode" @lock-change="onPrivacyLock" @unlock="onPrivacyUnlock" />
   <n-config-provider :theme="naiveTheme" :locale="naiveLocale" :date-locale="naiveDateLocale">
     <n-message-provider>
       <n-layout class="shell">
@@ -24,11 +25,9 @@
 
           <n-card v-if="!roomId" class="home" :bordered="true">
             <n-space vertical :size="18">
-              <div>
+              <div class="home-heading">
                 <h1>{{ t('web.title') }}</h1>
-                <select :value="localePreference" :aria-label="t('web.language')" class="language-select" @change="changeLocale($event.target.value)">
-                  <option v-for="option in localeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </select>
+                <n-button class="settings-trigger" quaternary circle :aria-label="t('ext.settings')" :title="t('ext.settings')" @click="settingsVisible = true"><span aria-hidden="true">⚙</span></n-button>
               </div>
               <n-alert
                 v-if="notice"
@@ -40,9 +39,17 @@
               >
                 {{ t(notice) }}
               </n-alert>
+              <n-modal v-model:show="settingsVisible" preset="card" class="preferences-dialog" :title="t('ext.settings')" :style="{ width: 'min(460px, calc(100vw - 32px))' }">
+              <n-space vertical :size="20">
+              <div class="theme-control">
+                <span>{{ t('web.language') }}</span>
+                <select :value="localePreference" :aria-label="t('web.language')" class="language-select" @change="changeLocale($event.target.value)">
+                  <option v-for="option in localeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+                </select>
+              </div>
               <div class="theme-control">
                 <span>{{ t('web.darkMode') }}</span>
-                <n-switch v-model:value="darkMode" size="small">
+                <n-switch v-model:value="darkMode" size="small" :aria-label="t('web.darkMode')">
                   <template #checked>{{ t('web.on') }}</template>
                   <template #unchecked>{{ t('web.off') }}</template>
                 </n-switch>
@@ -54,6 +61,12 @@
                   <template #unchecked>{{ t('web.off') }}</template>
                 </n-switch>
               </div>
+              <div v-if="privacyGuard?.desktop" class="privacy-controls">
+                <span>{{ t('privacy.title') }}</span><n-switch :value="privacyGuard.enabled" :aria-label="t('privacy.title')" @update:value="togglePrivacySetting" />
+                <n-button size="small" @click="openPrivacySetting">{{ t('privacy.settings') }}</n-button>
+              </div>
+              </n-space>
+              </n-modal>
               <div class="room-limit-control">
                 <span>{{ t('web.maxClients') }}</span>
                 <n-input-number v-model:value="roomMaxClients" :min="2" :max="100" :precision="0" size="small" :placeholder="t('web.maxClients')" />
@@ -124,6 +137,10 @@
             </n-alert>
 
             <div class="meta">
+              <div v-if="privacyGuard?.desktop" class="privacy-controls">
+                <span>{{ t('privacy.title') }}</span><n-switch :value="privacyGuard.enabled" :aria-label="t('privacy.title')" @update:value="privacyGuard.toggle" />
+                <n-button size="small" @click="privacyGuard.openSettings()">{{ t('privacy.settings') }}</n-button>
+              </div>
               <div class="name-control">
                 <label class="meta-label">{{ t('web.myName') }}</label>
                 <n-input
@@ -157,6 +174,10 @@
             </div>
 
             <section v-if="detailVisible" class="room-detail">
+              <div v-if="privacyGuard?.desktop" class="privacy-controls">
+                <span>{{ t('privacy.title') }}</span><n-switch :value="privacyGuard.enabled" :aria-label="t('privacy.title')" @update:value="privacyGuard.toggle" />
+                <n-button size="small" @click="privacyGuard.openSettings()">{{ t('privacy.settings') }}</n-button>
+              </div>
               <div class="detail-head">
                 <h2>{{ roomId }}</h2>
                 <n-button size="small" @click="detailVisible = false">{{ t('web.backToChat') }}</n-button>
@@ -319,7 +340,7 @@
                       :placeholder="t('web.messagePlaceholder')"
                       clearable
                       @paste="onMessagePaste"
-                      @keydown.enter.exact.prevent="sendMessage"
+                      @keydown.enter.exact="handleSendEnter"
                     />
                     <n-button class="composer-send" type="primary" attr-type="submit" :disabled="!canSubmit" :title="sendDisabledReason">
                       {{ selectedPeer ? t('web.sendPrivate', { name: displayNameFor(selectedPeer) }) : t('web.sendGroup') }}
@@ -328,7 +349,7 @@
                   <div class="composer-tools">
                     <n-button attr-type="button" :disabled="!canSend" :aria-label="t('web.chooseFile')" @click="chooseFile">📎</n-button>
                     <div class="emoji-desktop">
-                      <n-popover trigger="click" placement="top-start">
+                      <n-popover v-model:show="desktopEmojiVisible" trigger="click" placement="top-start">
                         <template #trigger>
                           <n-button attr-type="button" :disabled="!canSend" :aria-label="t('web.insertEmoji')">😀</n-button>
                         </template>
@@ -456,6 +477,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { asBytes, createProtocolV4, PROTOCOL_VERSION } from "./protocol-v4.js";
 import { partitionRetainedMessages } from "./message-retention.js";
 import { observeMessageVisibility } from "./message-visibility.js";
+import PrivacyGuard from './PrivacyGuard.vue';
 import { authenticatedEventReplayKey, signingIdentityForEvent } from "./authenticated-events.js";
 import { getLocale, getLocalePreference, localeOptions, onLocaleChange, setLocale, t as translate } from "./i18n.js";
 
@@ -472,6 +494,22 @@ const stopLocale = onLocaleChange((value) => { locale.value = value; localePrefe
 onBeforeUnmount(stopLocale);
 
 const roomId = ref("");
+const privacyGuard = ref(null);
+const settingsVisible = ref(false);
+function openPrivacySetting() { settingsVisible.value = false; privacyGuard.value?.openSettings(); }
+function togglePrivacySetting(value) { if (value) settingsVisible.value = false; privacyGuard.value?.toggle(value); }
+const privacyLocked = ref(false);
+function onPrivacyLock(value) {
+  privacyLocked.value = value;
+  if (value) {
+    handlePageBlur();
+    detailVisible.value = false;
+    memberDrawerVisible.value = false;
+    emojiPanelVisible.value = false;
+    desktopEmojiVisible.value = false;
+  }
+}
+function onPrivacyUnlock() { privacyLocked.value = false; handlePageFocus(); }
 const roomSecret = ref(null);
 const roomKey = ref(null);
 const authKey = ref(null);
@@ -522,6 +560,7 @@ const imagePreviewOffsetX = ref(0);
 const imagePreviewOffsetY = ref(0);
 const imagePreviewDragging = ref(false);
 const emojiPanelVisible = ref(false);
+const desktopEmojiVisible = ref(false);
 const emojiPanelRef = ref(null);
 const emojiToggleRef = ref(null);
 let messageSeq = 0;
@@ -1047,6 +1086,13 @@ function connectEvents() {
 
   wsTransport = createWebSocketTransport({
     epoch,
+    onRejected: () => {
+      if (settled || epoch !== sessionEpoch) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
+      connectionState.value = t('core.status.disconnected');
+      notice.value = t('web.roomUnavailable');
+    },
     onReady: () => {
       if (settled) return;
       settled = true;
@@ -1091,7 +1137,7 @@ function startSSETransport(epoch = sessionEpoch, resetRecovery = true) {
     },
     onEvent: dispatchWireEvent,
     onState: (state) => {
-      if (transport.value === sseTransport) connectionState.value = state;
+      if (epoch === sessionEpoch && (!transport.value || transport.value === sseTransport)) connectionState.value = state;
     },
   });
 }
@@ -1195,6 +1241,7 @@ function handleVisibilityRecovery() {
 }
 
 function handlePageFocus() {
+  if (privacyLocked.value) return;
   // Background tabs may throttle or suspend retention timers. Always prune
   // against wall-clock time before making any messages visible again.
   pageMessagesVisible.value = false;
@@ -1223,7 +1270,7 @@ function cancelWSRecovery(closeProbe = true) {
   pendingWSUpgrade = null;
 }
 
-function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState }) {
+function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState, onRejected }) {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   const url = `${scheme}://${location.host}/api/rooms/${encodeURIComponent(roomId.value)}/ws?client_id=${encodeURIComponent(deviceId.value)}`;
   const socket = new WebSocket(url);
@@ -1235,8 +1282,13 @@ function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState
   socket.addEventListener("error", () => {
     if (!ready) onFallback();
   });
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
     if (epoch !== sessionEpoch) return;
+    if (closedByClient) return;
+    if (!ready && onRejected && event.code === 1013 && ["room not found", "room expired"].includes(event.reason)) {
+      onRejected();
+      return;
+    }
     if (!ready) {
       onFallback();
       return;
@@ -1438,6 +1490,12 @@ function forgetPeer(id) {
     offlinePrivatePeers.value = offline;
     addSystemMessage(t('web.peerDisconnected', { name: displayNameFor(id) }));
   }
+}
+
+function handleSendEnter(event) {
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  sendMessage();
 }
 
 async function sendMessage() {
@@ -2878,6 +2936,8 @@ function shortId(id) {
 </script>
 
 <style scoped>
+.home-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-trigger { font-size: 24px; flex-shrink: 0; }
 .shell {
   height: 100vh;
   height: 100dvh;

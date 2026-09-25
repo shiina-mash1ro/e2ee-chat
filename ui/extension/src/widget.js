@@ -126,7 +126,7 @@ function bind() {
   document.querySelector("#code").onclick = () => { codeMode = !codeMode; render(); };
   document.querySelector("#purge").onclick = () => channel.request("purge").catch(showError);
   document.querySelector("#send").onclick = send;
-  document.querySelector("#draft").onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send(); } };
+  document.querySelector("#draft").onkeydown = (event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); send(); } };
   document.querySelectorAll("[data-emoji]").forEach((button) => button.onclick = () => { const draft = document.querySelector("#draft"); draft.value += button.dataset.emoji; draft.focus(); });
   document.querySelectorAll("[data-peer]").forEach((button) => button.onclick = () => { selectedPeer = button.dataset.peer; drawer = ""; render(); });
   document.querySelectorAll("[data-retry]").forEach((item) => item.onclick = () => channel.request("retry", { messageId: item.dataset.retry }).catch(showError));

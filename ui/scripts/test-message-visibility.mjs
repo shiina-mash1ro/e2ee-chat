@@ -9,12 +9,16 @@ function fixture(mouse = true) {
   doc.visibilityState = "visible";
   let focus = true;
   doc.hasFocus = () => focus;
+  win.innerWidth = 1000;
+  win.innerHeight = 900;
+  doc.activeElement = { tagName: "TEXTAREA" };
   win.matchMedia = () => ({ matches: mouse });
   const states = [];
   const stop = observeMessageVisibility(win, doc, (value) => states.push(value));
-  const emit = (target, type, pointerType = "mouse") => {
+  const emit = (target, type, pointerType = "mouse", extra = {}) => {
     const event = new Event(type);
     event.pointerType = pointerType;
+    Object.assign(event, extra);
     target.dispatchEvent(event);
   };
   return { win, doc, states, stop, emit, focus: (value) => { focus = value; }, visible: () => states.at(-1) };
@@ -37,6 +41,37 @@ test("mouse entry cannot override blur, and focus cannot override mouse leave", 
   f.stop();
   f.emit(f.doc.documentElement, "pointerleave");
   assert.equal(f.visible(), true);
+});
+
+test("IME candidate overlay inside viewport does not hide, real boundaries and blur still do", () => {
+  const f = fixture();
+  f.emit(f.doc, "pointermove");
+  f.emit(f.doc, "compositionstart");
+  f.emit(f.doc.documentElement, "pointerleave", "mouse", { clientX: 394, clientY: 855 });
+  assert.equal(f.visible(), true);
+  f.emit(f.doc, "compositionend");
+  assert.equal(f.visible(), true);
+  f.emit(f.doc, "compositionstart");
+  f.emit(f.doc.documentElement, "pointerleave", "mouse", { clientX: -6, clientY: 855 });
+  assert.equal(f.visible(), false);
+  f.emit(f.doc, "pointermove");
+  f.focus(false); f.emit(f.win, "blur");
+  f.emit(f.doc.documentElement, "pointerleave", "mouse", { clientX: 394, clientY: 855 });
+  assert.equal(f.visible(), false);
+  f.stop();
+});
+
+test("non-composing overlays and hidden pages remain concealed", () => {
+  const f = fixture();
+  f.emit(f.doc, "pointermove");
+  f.emit(f.doc.documentElement, "pointerleave", "mouse", { clientX: 394, clientY: 855 });
+  assert.equal(f.visible(), false);
+  f.emit(f.doc, "pointermove");
+  f.emit(f.doc, "compositionstart");
+  f.doc.visibilityState = "hidden";
+  f.emit(f.doc, "visibilitychange");
+  assert.equal(f.visible(), false);
+  f.stop();
 });
 
 test("touch release stays visible; background, blur and pagehide conceal", () => {
