@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "サポートチャットを表示"
+  },
+  "extensionDescription": {
+    "message": "ページの右下に共有の一時チャットを表示します。"
+  },
+  "greenExit": {
+    "message": "グリーン出口"
+  }
+}

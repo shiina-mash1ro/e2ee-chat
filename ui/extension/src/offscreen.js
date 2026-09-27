@@ -5,6 +5,9 @@ import { partitionRetainedMessages } from "../../src/message-retention.js";
 import { authenticatedEventReplayKey, signingIdentityForEvent } from "../../src/authenticated-events.js";
 import { CHANNEL_NAME } from "./channel.js";
 import { validateChatOrigin } from "./origin.js";
+import { initLocale, onLocaleChange, t } from "../../src/i18n.js";
+
+const localeReady = initLocale();
 
 const channel = new BroadcastChannel(CHANNEL_NAME);
 const widgets = new Map();
@@ -17,6 +20,12 @@ const pendingEpochKeys = new Map();
 const boxKeyHistory = new Map();
 const seenEvents = new Set();
 const peerIdentityPins = new Map();
+const pendingAuthenticatedPeerEvents = new Map();
+const pendingAuthenticatedPeerEventIds = new Set();
+const maxPendingAuthenticatedPeerEvents = 128;
+const maxPendingAuthenticatedPeerEventsPerPeer = 32;
+const pendingAuthenticatedPeerEventTtlMs = 15000;
+let pendingAuthenticatedPeerEventCount = 0;
 const retryDelays = [5000, 10000, 20000, 40000, 80000, 120000];
 const maxFileBytes = 20 * 1024 * 1024;
 const fallbackMaxFileBytes = 5 * 1024 * 1024;
@@ -57,6 +66,7 @@ let switching = false;
 let protocol;
 
 await sodium.ready;
+await localeReady;
 protocol = createProtocolV4(sodium);
 await restoreSession();
 
@@ -110,12 +120,15 @@ function broadcast(type, payload = {}) {
 }
 
 function publicState() {
+  // Offscreen/background timers can be throttled. Every foreground snapshot
+  // must enforce retention using wall-clock time before exposing messages.
+  pruneMessages(Date.now(), false);
   return {
     roomId,
     invitePath,
     deviceId,
     displayName,
-    status,
+    status: statusText(status),
     transportMode,
     canSend: Boolean(transport && roomKey),
     switching,
@@ -123,6 +136,18 @@ function publicState() {
     messages: messages.map(cloneMessage),
   };
 }
+
+function statusText(value) {
+  if (value === "未连接") return t("core.status.disconnected");
+  if (value === "连接中") return t("core.status.connecting");
+  if (value === "已连接") return t("core.status.connected");
+  if (value === "已连接（兼容模式）") return t("core.status.compat");
+  if (value.startsWith("兼容模式重连中：")) return t("core.status.compatRetry", { error: value.slice(8) });
+  if (value === "已连接（兼容模式，正在尝试 WebSocket）") return t("core.status.compatUpgrade");
+  return value;
+}
+
+onLocaleChange(() => publishState());
 
 function cloneMessage(message) {
   return {
@@ -150,13 +175,13 @@ async function handleAction({ action, payload = {} }) {
     case "copy-state": return { invitePath };
     case "set-name": return updateName(payload.displayName);
     case "leave": return leaveAndDestroy(false);
-    default: throw new Error("未知操作");
+    default: throw new Error(t("core.error.unknownOperation"));
   }
 }
 
 async function configuredOrigin() {
   const result = await storageGet("sync", "chatOrigin");
-  if (!result.chatOrigin) throw new Error("请先配置聊天服务地址");
+  if (!result.chatOrigin) throw new Error(t("core.error.configureOrigin"));
   return (await validateChatOrigin(result.chatOrigin, 3000)).origin;
 }
 
@@ -169,7 +194,7 @@ async function createStrong(payload) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ max_clients: normalizeMax(payload.maxClients) }),
   });
-  if (!response.ok) throw new Error(`创建房间失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(t("core.error.createRoom", { status: response.status }));
   await switchRoom({ targetOrigin, targetRoom, targetSecret, targetInvite: `r/${targetRoom}#k=${base64Url(targetSecret)}`, displayName: payload.displayName });
   return { roomId: targetRoom };
 }
@@ -177,27 +202,27 @@ async function createStrong(payload) {
 async function createCode(payload, joining) {
   const targetOrigin = await configuredOrigin();
   const code = normalizeCode(payload.code);
-  if (code && !validCode(code)) throw new Error("群聊码可用 4-32 位 A-Z 和 0-9");
-  if (joining && !validCode(code)) throw new Error("请输入有效群聊码");
+  if (code && !validCode(code)) throw new Error(t("core.error.codeFormat"));
+  if (joining && !validCode(code)) throw new Error(t("core.error.codeRequired"));
   const pow = await solvePow(targetOrigin);
   const response = await fetch(`${targetOrigin}/api/code-room`, {
     method: joining ? "PUT" : "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code, max_clients: normalizeMax(payload.maxClients), ...pow }),
   });
-  if (!response.ok) throw new Error(`群聊码请求失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(t("core.error.codeRequest", { status: response.status }));
   const result = await response.json();
   const targetUrl = new URL(result.url, targetOrigin);
   const targetRoom = targetUrl.pathname.split("/").filter(Boolean).pop();
   const roomCode = normalizeCode(new URLSearchParams(targetUrl.hash.slice(1)).get("p") || targetRoom);
-  if (!validCode(roomCode)) throw new Error("服务端返回了无效群聊码");
+  if (!validCode(roomCode)) throw new Error(t("core.error.invalidCode"));
   await switchRoom({ targetOrigin, targetRoom, targetSecret: deriveCodeSecret(roomCode), targetInvite: `r/${targetRoom}#p=${roomCode}`, displayName: payload.displayName });
   return { roomId: targetRoom };
 }
 
 async function solvePow(targetOrigin) {
   const response = await fetch(`${targetOrigin}/api/pow-challenge`);
-  if (!response.ok) throw new Error(`获取计算挑战失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(t("core.error.powRequest", { status: response.status }));
   const challenge = await response.json();
   const encoder = new TextEncoder();
   for (let nonce = 0; nonce < 100000000; nonce += 1) {
@@ -205,7 +230,7 @@ async function solvePow(targetOrigin) {
     if (leadingZeroBits(digest, Number(challenge.difficulty))) return { challenge: challenge.challenge, nonce };
     if (nonce % 2000 === 0) await new Promise((resolve) => setTimeout(resolve));
   }
-  throw new Error("计算挑战失败");
+  throw new Error(t("core.error.powFailed"));
 }
 
 function leadingZeroBits(bytes, bits) {
@@ -222,7 +247,7 @@ async function switchRoom({ targetOrigin, targetRoom, targetSecret, targetInvite
   roomId = targetRoom;
   secret = targetSecret;
   invitePath = targetInvite;
-  displayName = cleanName(nextName) || `访客${randomDigits(4)}`;
+  displayName = cleanName(nextName) || t("web.guest", { digits: randomDigits(4) });
   roomKey = sodium.crypto_generichash(32, secret, sodium.from_string("e2ee-chat-room-encryption-v4"));
   authKey = sodium.crypto_generichash(32, secret, sodium.from_string("e2ee-chat-room-auth-v4"));
   epochKeys.set(0, roomKey);
@@ -260,6 +285,7 @@ function resetMemory() {
   boxKeyHistory.clear();
   seenEvents.clear();
   peerIdentityPins.clear();
+  clearPendingAuthenticatedPeerEvents();
   currentEpoch = 0;
   epochMessageCount = 0;
   activeRotation = null;
@@ -301,7 +327,7 @@ async function restoreSession() {
       const key = fromB64(item?.key || "");
       if (Number.isInteger(epoch) && epoch >= 0 && key.length === 32) epochKeys.set(epoch, key);
     }
-    if (!epochKeys.has(currentEpoch)) throw new Error("invalid saved epoch state");
+    if (!epochKeys.has(currentEpoch)) throw new Error(t("core.error.invalidSavedState"));
     roomKey = epochKeys.get(currentEpoch);
     authKey = sodium.crypto_generichash(32, secret, sodium.from_string("e2ee-chat-room-auth-v4"));
     for (const item of chatSession.boxHistory || []) {
@@ -393,7 +419,7 @@ function createWebSocketTransport(generation, onReady, onFailure, onEvent) {
   return {
     mode: "ws",
     send(event) {
-      if (socket.readyState !== WebSocket.OPEN) throw new Error("WebSocket 未连接");
+      if (socket.readyState !== WebSocket.OPEN) throw new Error(t("core.error.socketDisconnected"));
       socket.send(encode(protocol.toWireEvent(event, "ws")));
     },
     bufferedAmount: () => socket.bufferedAmount,
@@ -413,7 +439,7 @@ function startSSE(generation) {
         headers: { "Content-Type": "application/json", "X-Connection-Token": connectionToken },
         body: JSON.stringify(protocol.toWireEvent(event, "sse")),
       });
-      if (!response.ok) throw new Error(`发送失败：HTTP ${response.status}`);
+      if (!response.ok) throw new Error(t("core.error.send", { status: response.status }));
     },
     close() { abort.abort(); },
   };
@@ -440,7 +466,7 @@ async function consumeSSE(generation, signal) {
   let buffer = "";
   while (generation === connectionGeneration && !signal.aborted) {
     const { value, done } = await reader.read();
-    if (done) throw new Error("SSE 已断开");
+    if (done) throw new Error(t("core.error.sseDisconnected"));
     buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
     let boundary;
     while ((boundary = buffer.indexOf("\n\n")) >= 0) {
@@ -522,17 +548,28 @@ async function handleEvent(event) {
   if (event.room && event.room !== roomId) return;
   if (event.type === "hello" || event.type === "peer_hello") {
     if (!verifyHello(event)) return;
-  } else if (requiresSignature(event.type) && !verifyPeerEvent(event)) return;
+  } else if (requiresSignature(event.type)) {
+    const verification = verifyPeerEvent(event);
+    if (verification === "pending") {
+      queuePendingAuthenticatedPeerEvent(event);
+      return;
+    }
+    if (!verification) return;
+  }
   switch (event.type) {
     case "hello":
       if (event.from === deviceId) break;
       if (!rememberPeer(event)) break;
+      await flushPendingAuthenticatedPeerEvents(event.from);
       await sendSigned({ type: "peer_hello", room: roomId, from: deviceId, to: event.from, public_key: keyPair.publicKey, sign_public_key: signingKeyPair.publicKey, sender_key_id: senderKeyId, display_name: displayName });
       await offerEpoch(event.from);
       break;
-    case "peer_hello": if (event.to === deviceId && event.from !== deviceId) rememberPeer(event); break;
+    case "peer_hello":
+      if (event.to === deviceId && event.from !== deviceId && rememberPeer(event)) await flushPendingAuthenticatedPeerEvents(event.from);
+      break;
     case "peer_leave": {
       const removed = peers.delete(event.from);
+      clearPendingAuthenticatedPeerEvents(event.from);
       if (removed && activeRotation) abortRotation(activeRotation.id).catch(reportError);
       publishState();
       break;
@@ -573,15 +610,15 @@ function rememberPeer(event) {
 }
 
 async function sendPayload(payload) {
-  if (!transport || !roomKey) throw new Error("当前未连接");
+  if (!transport || !roomKey) throw new Error(t("core.error.notConnected"));
   const text = payload.codeMode ? String(payload.text || "") : String(payload.text || "").trim();
   const file = payload.file || null;
   if (!text && !file) return;
   const target = payload.to || "";
-  if (target && !peers.has(target)) throw new Error("私聊对象已离线");
+  if (target && !peers.has(target)) throw new Error(t("core.error.peerOffline"));
   const active = { transport, mode: transport.mode, epoch: currentEpoch, key: epochKeys.get(currentEpoch) };
   const limit = active.mode === "sse" ? fallbackMaxFileBytes : maxFileBytes;
-  if (file?.size > limit) throw new Error(`当前连接最多发送 ${formatBytes(limit)} 文件`);
+  if (file?.size > limit) throw new Error(t("core.error.fileTooLarge", { size: formatBytes(limit) }));
   const messagePayload = {
     kind: payload.codeMode && !file ? "code" : file ? "file" : "text",
     text,
@@ -614,7 +651,7 @@ async function sendPayload(payload) {
 
 async function retryMessage(messageId) {
   const old = messages.find((item) => item.id === messageId && item.mine && item.status === "failed");
-  if (!old) throw new Error("找不到可重试的消息");
+  if (!old) throw new Error(t("core.error.retryNotFound"));
   const index = messages.indexOf(old);
   messages.splice(index, 1);
   publishState();
@@ -675,7 +712,7 @@ async function sendChunked(event, activeTransport) {
 
 function waitAck(id, timeoutMs) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { pendingAcks.delete(id); reject(new Error("服务端未确认消息")); }, timeoutMs);
+    const timer = setTimeout(() => { pendingAcks.delete(id); reject(new Error(t("err.serverAck"))); }, timeoutMs);
     pendingAcks.set(id, { resolve: () => { clearTimeout(timer); resolve(); } });
   });
 }
@@ -702,7 +739,7 @@ async function receiveGroup(event) {
   const peer = peers.get(event.from);
   if (!peer) return;
   const key = epochKeys.get(Number(event.epoch));
-  if (!key) throw new Error("未知群聊密钥代次");
+  if (!key) throw new Error(t("core.error.unknownEpoch"));
   const plaintext = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(null, asBytes(event.ciphertext), protocol.canonicalMessageAAD(event), asBytes(event.nonce), key);
   const payload = decodePayload(plaintext);
   addIncoming(event, payload, false);
@@ -717,7 +754,7 @@ async function receivePrivate(event) {
   const peer = peers.get(event.from);
   if (!peer) return;
   const recipient = event.recipient_key_id === senderKeyId ? keyPair : boxKeyHistory.get(event.recipient_key_id);
-  if (!recipient) throw new Error("未知私聊接收密钥");
+  if (!recipient) throw new Error(t("core.error.unknownRecipient"));
   const senderPublicKey = event.public_key ? asBytes(event.public_key) : peer.publicKey;
   const plaintext = sodium.crypto_box_open_easy(asBytes(event.ciphertext), asBytes(event.nonce), senderPublicKey, recipient.privateKey);
   addIncoming(event, decodePayload(plaintext), true);
@@ -738,7 +775,7 @@ function addIncoming(event, payload, privateMessage) {
   pruneMessages();
   publishState();
   storageGet("local", "notificationsEnabled").then(({ notificationsEnabled }) => {
-    if (notificationsEnabled) chrome.runtime.sendMessage({ type: "notify", message: privateMessage ? "新的私聊消息" : "新的群聊消息" });
+    if (notificationsEnabled) chrome.runtime.sendMessage({ type: "notify", message: t(privateMessage ? "core.message.private" : "core.message.group") });
   });
   wakeWSProbe();
 }
@@ -769,7 +806,7 @@ async function receiveChunk(event) {
 }
 
 async function purgeSelf() {
-  if (!transport) throw new Error("当前未连接");
+  if (!transport) throw new Error(t("core.error.notConnected"));
   await sendSigned({ type: "purge_self", room: roomId, from: deviceId });
   purgeMessages(deviceId);
 }
@@ -779,11 +816,11 @@ function purgeMessages(sender) {
   publishState();
 }
 
-function pruneMessages(now = Date.now()) {
+function pruneMessages(now = Date.now(), shouldPublish = true) {
   const { retained, removed } = partitionRetainedMessages(messages, now);
   if (!removed.length) return;
   messages.splice(0, messages.length, ...retained);
-  publishState();
+  if (shouldPublish) publishState();
 }
 
 async function updateName(value) {
@@ -835,10 +872,66 @@ function requiresSignature(type) {
 }
 
 function verifyPeerEvent(event) {
-  const peer = signingIdentityForEvent(event, { ownDeviceId: deviceId, ownSignPublicKey: signingKeyPair?.publicKey, ownKeyGeneration: keyGeneration, peer: peers.get(event.from) || peerIdentityPins.get(event.from) });
-  if (!peer) return false;
+  const pinnedPeer = peers.get(event.from) || peerIdentityPins.get(event.from);
+  const peer = signingIdentityForEvent(event, { ownDeviceId: deviceId, ownSignPublicKey: signingKeyPair?.publicKey, ownKeyGeneration: keyGeneration, peer: pinnedPeer });
+  if (!peer) {
+    const generation = Number(event.key_generation);
+    if (event.protocol !== PROTOCOL_VERSION || !pinnedPeer?.signPublicKey || !event.signature || !event.event_id ||
+        !Number.isInteger(generation) || generation <= Number(pinnedPeer.keyGeneration || 0) ||
+        !sodium.crypto_sign_verify_detached(asBytes(event.signature), protocol.canonicalEventBytes({ ...event, signature: undefined }), pinnedPeer.signPublicKey)) {
+      return false;
+    }
+    return "pending";
+  }
   if (!sodium.crypto_sign_verify_detached(asBytes(event.signature), protocol.canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey)) return false;
   return rememberEvent(event);
+}
+
+function queuePendingAuthenticatedPeerEvent(event) {
+  const replayId = authenticatedEventReplayKey(event);
+  if (!replayId || seenEvents.has(replayId) || pendingAuthenticatedPeerEventIds.has(replayId)) return;
+  prunePendingAuthenticatedPeerEvents();
+  const pending = pendingAuthenticatedPeerEvents.get(event.from) || [];
+  if (pending.length >= maxPendingAuthenticatedPeerEventsPerPeer || pendingAuthenticatedPeerEventCount >= maxPendingAuthenticatedPeerEvents) return;
+  pending.push({ event, replayId, receivedAt: Date.now() });
+  pendingAuthenticatedPeerEvents.set(event.from, pending);
+  pendingAuthenticatedPeerEventIds.add(replayId);
+  pendingAuthenticatedPeerEventCount += 1;
+}
+
+async function flushPendingAuthenticatedPeerEvents(peerId) {
+  const pending = pendingAuthenticatedPeerEvents.get(peerId) || [];
+  pendingAuthenticatedPeerEvents.delete(peerId);
+  for (const item of pending) {
+    pendingAuthenticatedPeerEventIds.delete(item.replayId);
+    pendingAuthenticatedPeerEventCount -= 1;
+    if (Date.now() - item.receivedAt <= pendingAuthenticatedPeerEventTtlMs) await handleEvent(item.event);
+  }
+}
+
+function prunePendingAuthenticatedPeerEvents(now = Date.now()) {
+  for (const [peerId, pending] of pendingAuthenticatedPeerEvents) {
+    const retained = pending.filter((item) => {
+      if (now - item.receivedAt <= pendingAuthenticatedPeerEventTtlMs) return true;
+      pendingAuthenticatedPeerEventIds.delete(item.replayId);
+      pendingAuthenticatedPeerEventCount -= 1;
+      return false;
+    });
+    if (retained.length) pendingAuthenticatedPeerEvents.set(peerId, retained);
+    else pendingAuthenticatedPeerEvents.delete(peerId);
+  }
+}
+
+function clearPendingAuthenticatedPeerEvents(peerId = "") {
+  const peerIds = peerId ? [peerId] : [...pendingAuthenticatedPeerEvents.keys()];
+  for (const id of peerIds) {
+    for (const item of pendingAuthenticatedPeerEvents.get(id) || []) {
+      pendingAuthenticatedPeerEventIds.delete(item.replayId);
+      pendingAuthenticatedPeerEventCount -= 1;
+    }
+    pendingAuthenticatedPeerEvents.delete(id);
+  }
+  if (!peerId) pendingAuthenticatedPeerEventCount = 0;
 }
 
 function rememberEvent(event) {
@@ -867,7 +960,7 @@ async function sendSigned(event, activeTransport = transport) {
 }
 
 async function sendEvent(event, activeTransport = transport) {
-  if (!activeTransport) throw new Error("当前未连接");
+  if (!activeTransport) throw new Error(t("core.error.notConnected"));
   await activeTransport.send(event);
 }
 
@@ -967,7 +1060,9 @@ async function handleKeyEvent(event) {
     activeRotation = null;
     return;
   }
-  if (event.type === "device_key_update") applyDeviceKeyUpdate(event);
+  if (event.type === "device_key_update" && applyDeviceKeyUpdate(event)) {
+    await flushPendingAuthenticatedPeerEvents(event.from);
+  }
 }
 
 async function commitRotation() {
@@ -1038,14 +1133,14 @@ function reportError(error) { broadcast("error", { error: error.message || Strin
 
 async function storageGet(area, keys) {
   const response = await chrome.runtime.sendMessage({ type: "storage-get", area, keys });
-  if (!response?.ok) throw new Error(response?.error || "读取扩展会话失败");
+  if (!response?.ok) throw new Error(response?.error || t("core.error.restoreSession"));
   return response.value || {};
 }
 async function storageSet(area, value) {
   const response = await chrome.runtime.sendMessage({ type: "storage-set", area, value });
-  if (!response?.ok) throw new Error(response?.error || "保存扩展会话失败");
+  if (!response?.ok) throw new Error(response?.error || t("core.error.saveSession"));
 }
 async function storageRemove(area, keys) {
   const response = await chrome.runtime.sendMessage({ type: "storage-remove", area, keys });
-  if (!response?.ok) throw new Error(response?.error || "清除扩展会话失败");
+  if (!response?.ok) throw new Error(response?.error || t("core.error.clearSession"));
 }

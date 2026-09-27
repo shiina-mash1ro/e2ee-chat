@@ -1,10 +1,11 @@
 export const MAX_CUSTOM_CSS_BYTES = 100 * 1024;
+import { t } from "../../src/i18n.js";
 const STYLE_ID = "e2ee-chat-custom-css";
 
 export function validateCustomCss(css, byteLength, fileName = "custom.css") {
-  if (!String(fileName).toLowerCase().endsWith(".css")) throw new Error("请选择 .css 文件");
-  if (!Number.isFinite(byteLength) || byteLength < 1) throw new Error("CSS 文件不能为空");
-  if (byteLength > MAX_CUSTOM_CSS_BYTES) throw new Error("CSS 文件不能超过 100 KiB");
+  if (!String(fileName).toLowerCase().endsWith(".css")) throw new Error(t("core.error.cssExtension"));
+  if (!Number.isFinite(byteLength) || byteLength < 1) throw new Error(t("core.error.cssEmpty"));
+  if (byteLength > MAX_CUSTOM_CSS_BYTES) throw new Error(t("core.error.cssTooLarge"));
   return String(css || "");
 }
 

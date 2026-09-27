@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "Afficher le chat d’assistance"
+  },
+  "extensionDescription": {
+    "message": "Affiche un chat d’assistance temporaire partagé en bas à droite de la page."
+  },
+  "greenExit": {
+    "message": "Sortie verte"
+  }
+}

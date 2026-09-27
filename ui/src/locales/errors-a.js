@@ -1,0 +1,9 @@
+export const ERRORS_A = {
+  "zh-CN": {"err.readFile":"读取文件失败","err.peerKey":"缺少对方公钥。","err.protocol":"不支持的协议","err.serverAck":"服务器未确认","err.chunkTimeout":"文件分块超时","err.cryptoTimeout":"加密 Worker 响应超时","err.cryptoFailed":"加密 Worker 失败","err.generic":"操作失败"},
+  "zh-TW": {"err.readFile":"讀取檔案失敗","err.peerKey":"缺少對方公鑰。","err.protocol":"不支援的協定","err.serverAck":"伺服器未確認","err.chunkTimeout":"檔案分塊逾時","err.cryptoTimeout":"加密 Worker 回應逾時","err.cryptoFailed":"加密 Worker 失敗","err.generic":"操作失敗"},
+  en: {"err.readFile":"Failed to read file","err.peerKey":"Missing peer public key.","err.protocol":"Unsupported protocol","err.serverAck":"Server did not acknowledge","err.chunkTimeout":"File chunk timed out","err.cryptoTimeout":"Crypto worker timed out","err.cryptoFailed":"Crypto worker failed","err.generic":"Operation failed"},
+  ja: {"err.readFile":"ファイルの読み込みに失敗しました","err.peerKey":"相手の公開鍵がありません。","err.protocol":"サポートされていないプロトコル","err.serverAck":"サーバーが確認応答しませんでした","err.chunkTimeout":"ファイルチャンクがタイムアウトしました","err.cryptoTimeout":"暗号化ワーカーがタイムアウトしました","err.cryptoFailed":"暗号化ワーカーに失敗しました","err.generic":"操作に失敗しました"},
+  ko: {"err.readFile":"파일을 읽지 못했습니다","err.peerKey":"상대 공개 키가 없습니다.","err.protocol":"지원되지 않는 프로토콜","err.serverAck":"서버가 확인하지 않았습니다","err.chunkTimeout":"파일 청크 시간이 초과되었습니다","err.cryptoTimeout":"암호화 워커 시간이 초과되었습니다","err.cryptoFailed":"암호화 워커 실패","err.generic":"작업 실패"},
+  fr: {"err.readFile":"Échec de lecture du fichier","err.peerKey":"Clé publique du pair manquante.","err.protocol":"Protocole non pris en charge","err.serverAck":"Le serveur n’a pas accusé réception","err.chunkTimeout":"Délai du fragment de fichier dépassé","err.cryptoTimeout":"Délai du worker cryptographique dépassé","err.cryptoFailed":"Échec du worker cryptographique","err.generic":"Échec de l’opération"}
+};
+export default ERRORS_A;

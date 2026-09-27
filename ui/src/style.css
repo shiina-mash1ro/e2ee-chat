@@ -58,3 +58,23 @@ textarea {
   height: 100vh;
   height: 100dvh;
 }
+
+.language-select {
+  max-width: 100%;
+  min-width: 9rem;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+html[dir="rtl"] .message pre,
+html[dir="rtl"] code,
+html[dir="rtl"] input[inputmode="url"] {
+  direction: ltr;
+  text-align: left;
+}
+
+html[dir="rtl"] .message-text { text-align: start; }

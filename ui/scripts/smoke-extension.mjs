@@ -2,6 +2,7 @@ import { chromium } from "playwright";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs/promises";
+import { catalogs, supportedLocales } from "../src/i18n.js";
 
 const extensionPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../dist/extension");
 const baseURL = process.env.BASE_URL || "http://127.0.0.1:8080";
@@ -15,6 +16,7 @@ testManifest.host_permissions = [`${base.protocol}//${base.hostname}/*`];
 await fs.writeFile(manifestPath, `${JSON.stringify(testManifest, null, 2)}\n`);
 const context = await chromium.launchPersistentContext("", {
   channel: "chromium", headless: true,
+  locale: "zh-CN",
   args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
 });
 
@@ -23,10 +25,20 @@ try {
   if (!worker) worker = await context.waitForEvent("serviceworker");
   const extensionId = new URL(worker.url()).host;
 
-  if (testManifest.name !== "显示客服" || testManifest.action?.default_popup) throw new Error("extension action was not configured to show the customer-service widget");
+  if (testManifest.name !== "__MSG_extensionName__" || testManifest.action?.default_popup) throw new Error("extension action was not configured to show the customer-service widget");
 
   const options = await context.newPage();
   await options.goto(`chrome-extension://${extensionId}/options.html`);
+  await options.locator("#origin").fill("https://unsaved.example.com");
+  for (const locale of supportedLocales) {
+    await options.locator("#language").selectOption(locale);
+    await options.getByRole("heading", { name: catalogs[locale]["ext.options.title"], exact: true }).waitFor();
+    if (await options.locator("#origin").inputValue() !== "https://unsaved.example.com") throw new Error("language switch erased unsaved settings");
+    if (await options.locator("#shortcut").textContent() !== catalogs[locale]["ext.options.unbound"]) throw new Error("shortcut label did not follow locale");
+    if (await options.locator("#cssStatus").textContent() !== catalogs[locale]["ext.options.notImported"]) throw new Error("CSS status did not follow locale");
+  }
+  await options.locator("#language").selectOption("zh-CN");
+  await options.reload();
   if (await options.locator("#origin").inputValue() !== "") throw new Error("extension unexpectedly shipped with a default origin");
   if ((await options.locator("#shortcut").textContent()) !== "未绑定") throw new Error("extension unexpectedly shipped with a default shortcut");
   if (await options.locator("#panicAction").inputValue() !== "wipe") throw new Error("panic action did not default to wipe");
@@ -107,11 +119,32 @@ try {
   const room = await first.locator(".room-title").textContent();
   if (!room || await second.locator(".room-title").textContent() !== room) throw new Error("extension windows did not share one room");
 
+  await first.locator("#draft").fill("draft survives language changes");
+  await first.locator("#details").click();
+  await first.locator("#displayName").fill("unsaved name");
+  await options.locator("#language").selectOption("en");
+  await first.getByPlaceholder(catalogs.en["ext.widget.messagePlaceholder"], { exact: true }).waitFor();
+  await second.getByPlaceholder(catalogs.en["ext.widget.messagePlaceholder"], { exact: true }).waitFor();
+  if (await first.locator("#draft").inputValue() !== "draft survives language changes") throw new Error("locale update erased widget draft");
+  if (await first.locator("#displayName").inputValue() !== "unsaved name") throw new Error("locale update erased unsaved display name");
+  if (await first.locator(".room-title").textContent() !== room) throw new Error("locale update changed shared room");
+  await options.locator("#language").selectOption("zh-CN");
+  await first.getByPlaceholder("输入消息", { exact: true }).waitFor();
+  await first.locator("#details").click();
+
   await first.locator("#draft").fill("来自第一个扩展窗口\n保留换行");
   await first.locator("#send").click();
+  // Reading now requires an active window with the mouse inside its viewport.
+  await second.bringToFront();
+  await second.mouse.move(100, 100);
   await second.locator(".message-text").filter({ hasText: "来自第一个扩展窗口" }).waitFor({ timeout: 10000 });
   const rendered = await second.locator(".message-text").last().textContent();
   if (rendered !== "来自第一个扩展窗口\n保留换行") throw new Error("message newline was not preserved");
+  await second.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await second.locator(".message").first().waitFor({ state: "detached", timeout: 10000 });
+  await second.locator(".empty").filter({ hasText: "消息已隐藏" }).waitFor();
+  await second.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await second.locator(".message-text").filter({ hasText: "来自第一个扩展窗口" }).waitFor({ timeout: 10000 });
 
   await first.close();
   await second.locator("#draft").fill("第二个窗口仍然在线");

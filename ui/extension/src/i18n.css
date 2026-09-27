@@ -1,0 +1,8 @@
+/* Keep natural-language layout RTL without reversing protocol identifiers. */
+html[dir="rtl"] .drawer { inset: 54px 25% 0 0; border-left: 0; border-right: 1px solid #dce3ec; }
+html[dir="rtl"] .drawer button { text-align: start; }
+html[dir="rtl"] .message-text { text-align: start; unicode-bidi: plaintext; }
+html[dir="rtl"] .message pre { direction: ltr; text-align: left; }
+.header button { flex-shrink: 0; }
+.input-row .send { max-width: 40%; overflow-wrap: anywhere; }
+.preview-head { flex-wrap: wrap; }

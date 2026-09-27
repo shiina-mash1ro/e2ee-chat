@@ -1,5 +1,6 @@
 import { decode, encode } from "@msgpack/msgpack";
 import sodium from "libsodium-wrappers";
+import { t } from "./i18n.js";
 
 await sodium.ready;
 
@@ -21,7 +22,7 @@ self.addEventListener("message", (event) => {
         result = privateDecrypt(data);
         break;
       default:
-        throw new Error(`Unknown crypto op: ${op}`);
+        throw new Error(t("core.error.cryptoUnknownOp", { op }));
     }
     self.postMessage({ id, ok: true, result });
   } catch (err) {

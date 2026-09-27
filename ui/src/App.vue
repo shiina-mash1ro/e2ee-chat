@@ -1,5 +1,6 @@
 <template>
-  <n-config-provider :theme="naiveTheme">
+  <PrivacyGuard ref="privacyGuard" :room-active="Boolean(roomId)" :dark="darkMode" @lock-change="onPrivacyLock" @unlock="onPrivacyUnlock" />
+  <n-config-provider :theme="naiveTheme" :locale="naiveLocale" :date-locale="naiveDateLocale">
     <n-message-provider>
       <n-layout class="shell">
         <n-layout-content class="content">
@@ -10,22 +11,54 @@
             class="name-modal"
             :style="{ width: 'min(420px, calc(100vw - 32px))' }"
           >
-            <template #header>进入房间</template>
+            <template #header>{{ t('web.enterRoom') }}</template>
             <n-space vertical :size="14">
               <n-input
                 v-model:value="pendingName"
                 maxlength="24"
-                placeholder="给自己起个名字"
+                :placeholder="t('web.namePlaceholder')"
                 @keydown.enter.prevent="confirmName"
               />
-              <n-button type="primary" block :disabled="!cleanName(pendingName)" @click="confirmName">进入聊天</n-button>
+              <n-button type="primary" block :disabled="!cleanName(pendingName)" @click="confirmName">{{ t('web.enterChat') }}</n-button>
             </n-space>
           </n-modal>
 
+              <n-modal v-model:show="settingsVisible" preset="card" class="preferences-dialog" :title="t('ext.settings')" :style="{ width: 'min(460px, calc(100vw - 32px))' }">
+              <n-space vertical :size="20">
+              <div v-if="roomId" class="theme-control">
+                <n-button :type="notificationsEnabled ? 'primary' : 'default'" @click="toggleNotifications">{{ notificationButtonText }}</n-button>
+              </div>
+              <div class="theme-control">
+                <span>{{ t('web.language') }}</span>
+                <select :value="localePreference" :aria-label="t('web.language')" class="language-select" @change="changeLocale($event.target.value)">
+                  <option v-for="option in localeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+                </select>
+              </div>
+              <div class="theme-control">
+                <span>{{ t('web.darkMode') }}</span>
+                <n-switch v-model:value="darkMode" size="small" :aria-label="t('web.darkMode')">
+                  <template #checked>{{ t('web.on') }}</template>
+                  <template #unchecked>{{ t('web.off') }}</template>
+                </n-switch>
+              </div>
+              <div class="theme-control">
+                <span>{{ t('web.popupMode') }}</span>
+                <n-switch v-model:value="popupMode" size="small" :aria-label="t('web.popupMode')">
+                  <template #checked>{{ t('web.on') }}</template>
+                  <template #unchecked>{{ t('web.off') }}</template>
+                </n-switch>
+              </div>
+              <div v-if="privacyGuard?.desktop" class="privacy-controls">
+                <span>{{ t('privacy.title') }}</span><n-switch :value="privacyGuard.enabled" :aria-label="t('privacy.title')" @update:value="togglePrivacySetting" />
+                <n-button size="small" @click="openPrivacySetting">{{ t('privacy.settings') }}</n-button>
+              </div>
+              </n-space>
+              </n-modal>
           <n-card v-if="!roomId" class="home" :bordered="true">
             <n-space vertical :size="18">
-              <div>
-                <h1>临时群聊</h1>
+              <div class="home-heading">
+                <h1>{{ t('web.title') }}</h1>
+                <n-button class="settings-trigger" quaternary circle :aria-label="t('ext.settings')" :title="t('ext.settings')" @click="settingsVisible = true"><span aria-hidden="true">⚙</span></n-button>
               </div>
               <n-alert
                 v-if="notice"
@@ -35,30 +68,16 @@
                 closable
                 @close="notice = ''"
               >
-                {{ notice }}
+                {{ t(notice) }}
               </n-alert>
-              <div class="theme-control">
-                <span>深色模式</span>
-                <n-switch v-model:value="darkMode" size="small">
-                  <template #checked>开</template>
-                  <template #unchecked>关</template>
-                </n-switch>
-              </div>
-              <div class="theme-control">
-                <span>独立窗口模式</span>
-                <n-switch v-model:value="popupMode" size="small" aria-label="独立窗口模式">
-                  <template #checked>开</template>
-                  <template #unchecked>关</template>
-                </n-switch>
-              </div>
               <div class="room-limit-control">
-                <span>最大人数</span>
-                <n-input-number v-model:value="roomMaxClients" :min="2" :max="100" :precision="0" size="small" />
-                <small>包含创建者，默认 4 人</small>
+                <span>{{ t('web.maxClients') }}</span>
+                <n-input-number v-model:value="roomMaxClients" :min="2" :max="100" :precision="0" size="small" :placeholder="t('web.maxClients')" />
+                <small>{{ t('web.maxClientsHint') }}</small>
               </div>
               <n-space>
-                <n-button type="primary" size="large" :loading="roomCreateBusy" @click="createRoom">创建大力房间</n-button>
-                <n-button size="large" :loading="codeBusy" @click="createCodeRoom">创建随机码房间</n-button>
+                <n-button type="primary" size="large" :loading="roomCreateBusy" @click="createRoom">{{ t('web.createBigRoom') }}</n-button>
+                <n-button size="large" :loading="codeBusy" @click="createCodeRoom">{{ t('web.createRandomRoom') }}</n-button>
               </n-space>
 
               <n-divider />
@@ -67,24 +86,24 @@
                 <n-input
                   v-model:value="customCode"
                   maxlength="32"
-                  placeholder="自定义群聊码，可留空随机生成"
+                  :placeholder="t('web.customCodePlaceholder')"
                   clearable
                   @keydown.enter.prevent="createCodeRoom"
                 />
-                <n-button attr-type="submit" :loading="codeBusy" :disabled="Boolean(customCode.trim()) && !validCustomCode">用自定义码创建</n-button>
+                <n-button attr-type="submit" :loading="codeBusy" :disabled="Boolean(customCode.trim()) && !validCustomCode">{{ t('web.createCustom') }}</n-button>
               </n-form>
 
               <n-form class="join-code-form" @submit.prevent="joinCodeRoom">
                 <n-input
                   v-model:value="joinCode"
                   maxlength="32"
-                  placeholder="输入群聊码"
+                  :placeholder="t('web.codePlaceholder')"
                   clearable
                   @keydown.enter.prevent="joinCodeRoom"
                 />
-                <n-button type="primary" attr-type="submit" :loading="codeBusy" :disabled="!validJoinCode">用群聊码加入</n-button>
+                <n-button type="primary" attr-type="submit" :loading="codeBusy" :disabled="!validJoinCode">{{ t('web.joinCode') }}</n-button>
               </n-form>
-              <p class="weak-note">群聊码支持 4-32 位 A-Z 和 0-9 自定义码。</p>
+              <p class="weak-note">{{ t('web.codeHint') }}</p>
             </n-space>
           </n-card>
 
@@ -92,20 +111,14 @@
             <header class="room-header">
               <div class="room-heading">
                 <strong>{{ roomId }}</strong>
-                <span class="desktop-only">房间</span>
+                <span class="desktop-only">{{ t('web.room') }}</span>
               </div>
               <div class="room-actions">
-                <n-button class="mobile-only" size="small" @click="memberDrawerVisible = true">成员</n-button>
-                <n-button class="mobile-only" size="small" @click="detailVisible = true">详情</n-button>
-                <n-button size="small" :type="notificationsEnabled ? 'primary' : 'default'" @click="toggleNotifications">
-                  {{ notificationButtonText }}
-                </n-button>
-                <n-switch v-model:value="darkMode" size="small">
-                  <template #checked>暗</template>
-                  <template #unchecked>亮</template>
-                </n-switch>
-                <n-button class="desktop-only" size="small" @click="copyInvite">复制邀请链接</n-button>
-                <n-button class="desktop-only" size="small" @click="copySafety">复制唯一码</n-button>
+                <n-button class="mobile-only" size="small" @click="memberDrawerVisible = true">{{ t('web.members') }}</n-button>
+                <n-button class="mobile-only" size="small" @click="detailVisible = true">{{ t('web.details') }}</n-button>
+                <n-button class="settings-trigger" quaternary circle :aria-label="t('ext.settings')" :title="t('ext.settings')" @click="settingsVisible = true"><span aria-hidden="true">⚙</span></n-button>
+                <n-button class="desktop-only" size="small" @click="copyInvite">{{ t('web.copyInvite') }}</n-button>
+                <n-button class="desktop-only" size="small" @click="copySafety">{{ t('web.copySafety') }}</n-button>
               </div>
             </header>
 
@@ -117,77 +130,77 @@
               closable
               @close="notice = ''"
             >
-              {{ notice }}
+              {{ t(notice) }}
             </n-alert>
 
             <div class="meta">
               <div class="name-control">
-                <label class="meta-label">我的名字</label>
+                <label class="meta-label">{{ t('web.myName') }}</label>
                 <n-input
                   v-model:value="displayName"
                   maxlength="24"
                   size="small"
-                  placeholder="我的名字"
+                  :placeholder="t('web.myName')"
                   :disabled="!deviceId"
                   @blur="updateDisplayName"
                   @keydown.enter.prevent="updateDisplayName"
                 />
               </div>
               <div class="meta-pill">
-                <span>设备</span>
+                <span>{{ t('web.device') }}</span>
                 <strong>{{ shortId(deviceId) }}</strong>
               </div>
               <div class="meta-pill">
-                <span>唯一码</span>
+                <span>{{ t('web.safetyCode') }}</span>
                 <strong>{{ safetyCode || "-" }}</strong>
               </div>
               <div class="meta-pill status">
-                <span>状态</span>
-                <strong>{{ connectionState }}</strong>
+                <span>{{ t('web.status') }}</span>
+                <strong>{{ t(connectionState) }}</strong>
               </div>
             </div>
 
             <section v-if="detailVisible" class="room-detail">
               <div class="detail-head">
                 <h2>{{ roomId }}</h2>
-                <n-button size="small" @click="detailVisible = false">返回聊天</n-button>
+                <n-button size="small" @click="detailVisible = false">{{ t('web.backToChat') }}</n-button>
               </div>
               <div class="detail-list">
-                <label>我的名字</label>
+                <label>{{ t('web.myName') }}</label>
                 <n-input
                   v-model:value="displayName"
                   maxlength="24"
                   size="small"
-                  placeholder="我的名字"
+                  :placeholder="t('web.myName')"
                   :disabled="!deviceId"
                   @blur="updateDisplayName"
                   @keydown.enter.prevent="updateDisplayName"
                 />
-                <label>我的设备</label>
+                <label>{{ t('web.myDevice') }}</label>
                 <strong>{{ shortId(deviceId) }}</strong>
-                <label>群聊唯一码</label>
+                <label>{{ t('web.roomSafetyCode') }}</label>
                 <strong>{{ safetyCode || "-" }}</strong>
-                <label>连接状态</label>
-                <strong>{{ connectionState }}</strong>
+                <label>{{ t('web.connectionStatus') }}</label>
+                <strong>{{ t(connectionState) }}</strong>
               </div>
               <div class="detail-actions">
-                <n-button @click="copyInvite">复制邀请链接</n-button>
-                <n-button @click="copySafety">复制唯一码</n-button>
+                <n-button @click="copyInvite">{{ t('web.copyInvite') }}</n-button>
+                <n-button @click="copySafety">{{ t('web.copySafety') }}</n-button>
               </div>
             </section>
 
             <div v-else class="chat-grid">
               <aside class="members">
                 <div class="members-head">
-                  <h2>在线成员</h2>
+                  <h2>{{ t('web.onlineMembers') }}</h2>
                   <n-button size="small" :type="selectedPeer ? 'default' : 'primary'" @click="selectPeer('')">
-                    群聊
+                    {{ t('web.groupChat') }}
                   </n-button>
                 </div>
                 <n-scrollbar class="peer-scroll">
                   <n-list hoverable clickable>
                     <n-list-item>
-                      <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`">
+                      <n-thing :title="`${displayName || shortId(deviceId)}${t('web.me')}`" :description="`${t('web.device')} ${shortId(deviceId)}`">
                         <template #avatar>
                           <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
                         </template>
@@ -199,7 +212,7 @@
                       :class="{ active: selectedPeer === peer.id }"
                       @click="selectPeer(peer.id)"
                     >
-                      <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发唯一码 ${pairSafetyNumber(peer.publicKey)}`">
+                      <n-thing :title="peer.name || shortId(peer.id)" :description="`${t('web.device')} ${shortId(peer.id)} · ${t('web.privateSafety')} ${pairSafetyNumber(peer.publicKey)}`">
                         <template #avatar>
                           <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
                         </template>
@@ -217,38 +230,38 @@
                 @dragleave.prevent="onFileDragLeave"
                 @drop.prevent="onFileDrop"
               >
-                <div v-if="fileDragActive" class="file-drop-overlay">松开以添加文件</div>
+                <div v-if="fileDragActive" class="file-drop-overlay">{{ t('web.releaseToAddFile') }}</div>
                 <n-scrollbar ref="messageScrollRef" class="messages">
                   <div class="message-stack">
                     <article
-                      v-for="message in messages"
+                      v-for="message in visibleMessages"
                       :key="message.id"
                       class="message"
                       :class="{ mine: message.mine, private: message.privateTo, system: message.system }"
                       :style="message.system ? null : messageStyle(message)"
                     >
                       <template v-if="message.system">
-                        {{ message.text }}
+                        {{ t(message.text) }}
                       </template>
                       <template v-else>
                         <span class="avatar message-avatar" :style="userVisual(message.from).avatarStyle">{{ userVisual(message.from).avatar }}</span>
                         <div class="message-bubble">
                           <div class="byline">
                             <span>{{ messageLabel(message) }}</span>
-                            <span v-if="isMessageBusy(message)" class="message-spinner" title="发送中"></span>
+                            <span v-if="isMessageBusy(message)" class="message-spinner" :title="t('web.sending')"></span>
                             <button
                               v-else-if="message.status === 'failed'"
                               type="button"
                               class="message-status"
-                              :title="`${message.failureReason || '发送失败'}；点击重新发送`"
-                              aria-label="重新发送失败的消息"
+                              :title="`${message.failureReason || t('web.sendFailed')}；${t('web.retryFailed')}`"
+                              :aria-label="t('web.retryFailedAria')"
                               @click="retryMessage(message)"
                             >!</button>
                           </div>
                           <div v-if="message.kind === 'code'" class="code-block">
                             <div class="code-block-head">
-                              <span>代码</span>
-                              <n-button size="tiny" quaternary @click="copyCodeBlock(message.text)">复制</n-button>
+                              <span>{{ t('web.code') }}</span>
+                              <n-button size="tiny" quaternary @click="copyCodeBlock(message.text)">{{ t('web.copy') }}</n-button>
                             </div>
                             <pre><code>{{ message.text }}</code></pre>
                           </div>
@@ -265,7 +278,7 @@
                               @keydown.enter.prevent="openImagePreview(message.file)"
                             />
                             <a class="attachment-link" :href="fileObjectUrl(message.file)" :download="message.file.name">
-                              <span>{{ isImageFile(message.file) ? "查看/下载图片" : "下载文件" }}</span>
+                              <span>{{ isImageFile(message.file) ? t('web.viewDownloadImage') : t('web.downloadFile') }}</span>
                               <strong>{{ message.file.name }}</strong>
                               <em>{{ formatBytes(message.file.size) }}</em>
                             </a>
@@ -276,7 +289,7 @@
                   </div>
                 </n-scrollbar>
 
-                <section v-if="emojiPanelVisible" id="emoji-panel" ref="emojiPanelRef" class="emoji-panel" aria-label="Emoji 选择器">
+                <section v-if="emojiPanelVisible" id="emoji-panel" ref="emojiPanelRef" class="emoji-panel" :aria-label="t('web.emojiPicker')">
                   <div class="emoji-grid">
                     <button v-for="emoji in emojiList" :key="emoji" type="button" @click="insertEmoji(emoji)">
                       {{ emoji }}
@@ -292,7 +305,7 @@
                     :alt="selectedFile.name"
                   />
                   <span>{{ selectedFile.name }} · {{ formatBytes(selectedFile.size) }}</span>
-                  <n-button size="tiny" @click="clearSelectedFile">移除</n-button>
+                  <n-button size="tiny" @click="clearSelectedFile">{{ t('web.remove') }}</n-button>
                 </div>
 
                 <n-form class="composer" @submit.prevent="sendMessage">
@@ -304,21 +317,21 @@
                       type="textarea"
                       :autosize="{ minRows: 1, maxRows: 6 }"
                       maxlength="4096"
-                      placeholder="输入消息"
+                      :placeholder="t('web.messagePlaceholder')"
                       clearable
                       @paste="onMessagePaste"
-                      @keydown.enter.exact.prevent="sendMessage"
+                      @keydown.enter.exact="handleSendEnter"
                     />
                     <n-button class="composer-send" type="primary" attr-type="submit" :disabled="!canSubmit" :title="sendDisabledReason">
-                      {{ selectedPeer ? `私发给 ${displayNameFor(selectedPeer)}` : "发送群聊" }}
+                      {{ selectedPeer ? t('web.sendPrivate', { name: displayNameFor(selectedPeer) }) : t('web.sendGroup') }}
                     </n-button>
                   </div>
                   <div class="composer-tools">
-                    <n-button attr-type="button" :disabled="!canSend" aria-label="选择图片或文件" @click="chooseFile">📎</n-button>
+                    <n-button attr-type="button" :disabled="!canSend" :aria-label="t('web.chooseFile')" @click="chooseFile">📎</n-button>
                     <div class="emoji-desktop">
-                      <n-popover trigger="click" placement="top-start">
+                      <n-popover v-model:show="desktopEmojiVisible" trigger="click" placement="top-start">
                         <template #trigger>
-                          <n-button attr-type="button" :disabled="!canSend" aria-label="插入 emoji">😀</n-button>
+                          <n-button attr-type="button" :disabled="!canSend" :aria-label="t('web.insertEmoji')">😀</n-button>
                         </template>
                         <div
                           class="emoji-grid emoji-grid-popover"
@@ -343,7 +356,7 @@
                         :disabled="!canSend"
                         :aria-expanded="emojiPanelVisible"
                         aria-controls="emoji-panel"
-                        aria-label="插入 emoji"
+                        :aria-label="t('web.insertEmoji')"
                         @click="emojiPanelVisible = !emojiPanelVisible"
                       >😀</n-button>
                     </div>
@@ -352,13 +365,13 @@
                       :type="codeMode ? 'primary' : 'default'"
                       :disabled="!canToggleCodeMode"
                       :aria-pressed="codeMode"
-                      aria-label="切换代码模式"
+                      :aria-label="t('web.toggleCode')"
                       @click="codeMode = !codeMode"
                     >&lt;/&gt;</n-button>
                     <n-button
                       attr-type="button"
                       :loading="roomActionBusy"
-                      aria-label="一键鸵鸟"
+                      :aria-label="t('web.purge')"
                       @click="purgeOwnMessages"
                     >🦤</n-button>
                   </div>
@@ -367,14 +380,14 @@
             </div>
 
             <n-drawer v-model:show="memberDrawerVisible" placement="left" :width="300">
-              <n-drawer-content title="在线成员" closable>
+            <n-drawer-content :title="t('web.onlineMembers')" closable>
                 <div class="drawer-members">
                   <n-button block :type="selectedPeer ? 'default' : 'primary'" @click="selectPeer('')">
-                    群聊
+                    {{ t('web.groupChat') }}
                   </n-button>
                   <n-list hoverable clickable>
                     <n-list-item>
-                      <n-thing :title="`${displayName || shortId(deviceId)}（我）`" :description="`设备 ${shortId(deviceId)}`">
+                      <n-thing :title="`${displayName || shortId(deviceId)}${t('web.me')}`" :description="`${t('web.device')} ${shortId(deviceId)}`">
                         <template #avatar>
                           <span class="avatar" :style="userVisual(deviceId).avatarStyle">{{ userVisual(deviceId).avatar }}</span>
                         </template>
@@ -386,7 +399,7 @@
                       :class="{ active: selectedPeer === peer.id }"
                       @click="selectPeer(peer.id)"
                     >
-                      <n-thing :title="peer.name || shortId(peer.id)" :description="`设备 ${shortId(peer.id)} · 私发唯一码 ${pairSafetyNumber(peer.publicKey)}`">
+                      <n-thing :title="peer.name || shortId(peer.id)" :description="`${t('web.device')} ${shortId(peer.id)} · ${t('web.privateSafety')} ${pairSafetyNumber(peer.publicKey)}`">
                         <template #avatar>
                           <span class="avatar" :style="userVisual(peer.id).avatarStyle">{{ userVisual(peer.id).avatar }}</span>
                         </template>
@@ -418,14 +431,14 @@
                 </div>
                 <div class="image-preview-actions">
                   <strong>{{ imagePreviewName }}</strong>
-                  <div class="image-preview-zoom" aria-label="图片缩放控制">
-                    <n-button size="small" aria-label="缩小图片" :disabled="imagePreviewScale <= 0.5" @click="zoomImagePreview(-0.25)">−</n-button>
+                  <div class="image-preview-zoom" :aria-label="t('web.imageZoom')">
+                    <n-button size="small" :aria-label="t('web.zoomOut')" :disabled="imagePreviewScale <= 0.5" @click="zoomImagePreview(-0.25)">−</n-button>
                     <span>{{ Math.round(imagePreviewScale * 100) }}%</span>
-                    <n-button size="small" aria-label="放大图片" :disabled="imagePreviewScale >= 5" @click="zoomImagePreview(0.25)">＋</n-button>
-                    <n-button size="small" @click="resetImagePreviewTransform">重置</n-button>
+                    <n-button size="small" :aria-label="t('web.zoomIn')" :disabled="imagePreviewScale >= 5" @click="zoomImagePreview(0.25)">＋</n-button>
+                    <n-button size="small" @click="resetImagePreviewTransform">{{ t('web.reset') }}</n-button>
                   </div>
-                  <a :href="imagePreviewUrl" :download="imagePreviewName">下载原图</a>
-                  <n-button size="small" @click="closeImagePreview">关闭</n-button>
+                  <a :href="imagePreviewUrl" :download="imagePreviewName">{{ t('web.downloadOriginal') }}</a>
+                  <n-button size="small" @click="closeImagePreview">{{ t('web.close') }}</n-button>
                 </div>
               </div>
             </n-modal>
@@ -439,13 +452,45 @@
 <script setup>
 import { decode, encode } from "@msgpack/msgpack";
 import sodium from "libsodium-wrappers";
-import { darkTheme } from "naive-ui";
+import { darkTheme, dateEnUS, dateJaJP, dateZhCN, dateZhTW, enUS, jaJP, zhCN, zhTW, arDZ, deDE, esAR, frFR, koKR, ptBR, ruRU } from "naive-ui";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { asBytes, createProtocolV4, PROTOCOL_VERSION } from "./protocol-v4.js";
 import { partitionRetainedMessages } from "./message-retention.js";
+import { observeMessageVisibility } from "./message-visibility.js";
+import PrivacyGuard from './PrivacyGuard.vue';
 import { authenticatedEventReplayKey, signingIdentityForEvent } from "./authenticated-events.js";
+import { getLocale, getLocalePreference, localeOptions, onLocaleChange, setLocale, t as translate } from "./i18n.js";
+
+const locale = ref(getLocale());
+const localePreference = ref(getLocalePreference());
+const t = (key, params = {}) => { locale.value; return translate(key, params); };
+const naiveLocale = computed(() => ({ 'zh-CN': zhCN, 'zh-TW': zhTW, en: enUS, ja: jaJP, ar: arDZ, de: deDE, es: esAR, fr: frFR, ko: koKR, pt: ptBR, ru: ruRU }[locale.value] || enUS));
+const naiveDateLocale = computed(() => ({ 'zh-CN': dateZhCN, 'zh-TW': dateZhTW, ja: dateJaJP }[locale.value] || dateEnUS));
+function changeLocale(value) {
+  localePreference.value = value;
+  setLocale(value);
+}
+const stopLocale = onLocaleChange((value) => { locale.value = value; localePreference.value = getLocalePreference(); });
+onBeforeUnmount(stopLocale);
 
 const roomId = ref("");
+const privacyGuard = ref(null);
+const settingsVisible = ref(false);
+function openPrivacySetting() { settingsVisible.value = false; privacyGuard.value?.openSettings(); }
+function togglePrivacySetting(value) { if (value) settingsVisible.value = false; privacyGuard.value?.toggle(value); }
+const privacyLocked = ref(false);
+function onPrivacyLock(value) {
+  privacyLocked.value = value;
+  if (value) {
+    settingsVisible.value = false;
+    handlePageBlur();
+    detailVisible.value = false;
+    memberDrawerVisible.value = false;
+    emojiPanelVisible.value = false;
+    desktopEmojiVisible.value = false;
+  }
+}
+function onPrivacyUnlock() { privacyLocked.value = false; handlePageFocus(); }
 const roomSecret = ref(null);
 const roomKey = ref(null);
 const authKey = ref(null);
@@ -460,8 +505,9 @@ const transport = ref(null);
 const transportMode = ref("");
 const notice = ref("");
 const safetyCode = ref("");
-const connectionState = ref("未连接");
+const connectionState = ref(t('web.notConnected'));
 const messages = ref([]);
+const pageMessagesVisible = ref(document.visibilityState === "visible" && document.hasFocus());
 const draft = ref("");
 const codeMode = ref(false);
 const messageScrollRef = ref(null);
@@ -495,6 +541,7 @@ const imagePreviewOffsetX = ref(0);
 const imagePreviewOffsetY = ref(0);
 const imagePreviewDragging = ref(false);
 const emojiPanelVisible = ref(false);
+const desktopEmojiVisible = ref(false);
 const emojiPanelRef = ref(null);
 const emojiToggleRef = ref(null);
 let messageSeq = 0;
@@ -537,6 +584,12 @@ const boxKeyHistory = new Map();
 const pendingEpochKeys = new Map();
 const seenAuthenticatedEvents = new Set();
 const peerIdentityPins = new Map();
+const pendingAuthenticatedPeerEvents = new Map();
+const pendingAuthenticatedPeerEventIds = new Set();
+const maxPendingAuthenticatedPeerEvents = 128;
+const maxPendingAuthenticatedPeerEventsPerPeer = 32;
+const pendingAuthenticatedPeerEventTtlMs = 15000;
+let pendingAuthenticatedPeerEventCount = 0;
 let currentEpoch = 0;
 let epochMessageCount = 0;
 let epochStartedAt = 0;
@@ -599,23 +652,25 @@ const emojiList = [
 ];
 
 const canSend = computed(() => Boolean(cryptoReady.value && roomKey.value && transport.value));
+const visibleMessages = computed(() => (pageMessagesVisible.value ? messages.value : []));
 const selectedPeerOffline = computed(() => Boolean(selectedPeer.value && !peers.value.has(selectedPeer.value)));
 const canSubmit = computed(() => canSend.value && !selectedPeerOffline.value && (Boolean(draft.value.trim()) || Boolean(selectedFile.value)));
 const canToggleCodeMode = computed(() => canSend.value && !selectedPeerOffline.value && !selectedFile.value);
-const sendDisabledReason = computed(() => (selectedPeerOffline.value ? "私聊对象已断开，请重新选择私聊对象或切回群聊" : ""));
+const sendDisabledReason = computed(() => (selectedPeerOffline.value ? t('web.peerDisconnected', { name: '' }) : ""));
 const validJoinCode = computed(() => isValidCode(joinCode.value));
 const validCustomCode = computed(() => isValidCode(customCode.value));
 const sortedPeers = computed(() => [...peers.value.entries()].sort().map(([id, peer]) => ({ id, ...peer })));
 const naiveTheme = computed(() => (darkMode.value ? darkTheme : null));
 const notificationButtonText = computed(() => {
-  if (!notificationSupported()) return "通知不可用";
-  return notificationsEnabled.value ? "通知开" : "通知关";
+  if (!notificationSupported()) return t('web.notificationUnavailable');
+  return notificationsEnabled.value ? t('web.notificationsOn') : t('web.notificationsOff');
 });
 const imagePreviewTransform = computed(() => ({
   transform: `translate(${imagePreviewOffsetX.value}px, ${imagePreviewOffsetY.value}px) scale(${imagePreviewScale.value})`,
 }));
 
 watch(darkMode, applyTheme, { immediate: true });
+watch([locale, roomId], () => { document.title = roomId.value || t('web.title'); }, { immediate: true });
 watch(popupMode, (enabled) => {
   localStorage.setItem("e2ee-chat-popup-mode", enabled ? "1" : "0");
 }, { immediate: true });
@@ -636,12 +691,18 @@ onBeforeUnmount(() => {
   revokeFileObjectUrls();
   if (rotationTimer) clearInterval(rotationTimer);
   if (messageRetentionTimer) clearInterval(messageRetentionTimer);
+  clearPendingAuthenticatedPeerEvents();
   window.removeEventListener("online", wakeWSRecovery);
+  stopMessageVisibility();
   document.removeEventListener("visibilitychange", handleVisibilityRecovery);
   document.removeEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 });
 
 window.addEventListener("online", wakeWSRecovery);
+const stopMessageVisibility = observeMessageVisibility(window, document, (visible) => {
+  if (visible) handlePageFocus();
+  else handlePageBlur();
+});
 document.addEventListener("visibilitychange", handleVisibilityRecovery);
 document.addEventListener("pointerdown", closeEmojiPanelOnOutsideClick);
 
@@ -653,7 +714,7 @@ function boot() {
   document.title = parsedRoomId;
   const secret = readRoomSecret(parsedRoomId);
   if (!secret) {
-    notice.value = "缺少房间信息，无法进入聊天。请使用包含 #k=... 的完整邀请链接，或从首页输入群聊码加入。";
+    notice.value = t('web.invalidInvite');
     return;
   }
 
@@ -671,7 +732,7 @@ function boot() {
   safetyCode.value = safetyNumber(secret, 18);
 
   const savedName = cleanName(sessionStorage.getItem("e2ee-chat-display-name") || "");
-  pendingName.value = savedName || `访客${randomDigits(4)}`;
+    pendingName.value = savedName || t('web.guest', { digits: randomDigits(4) });
   if (savedName) {
     displayName.value = savedName;
     startChatSession();
@@ -814,7 +875,7 @@ function beginRoomNavigation() {
   ].join(",");
   const popup = window.open("about:blank", `e2ee-chat-${Date.now()}`, features);
   if (!popup) {
-    window.alert("新窗口被浏览器拦截，将在当前标签打开。请允许本站弹出窗口后重试独立窗口模式。");
+    window.alert(t('web.popupBlocked'));
     return { popup: null };
   }
   return { popup };
@@ -832,7 +893,7 @@ function navigateToRoom(navigation, url) {
       return;
     } catch {
       cancelRoomNavigation(navigation);
-      window.alert("独立窗口无法打开，将在当前标签打开。");
+      window.alert(t('web.popupFailed'));
     }
   }
   location.replace(url);
@@ -855,7 +916,7 @@ async function createRoom() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ max_clients: normalizedRoomMaxClients() }),
     });
-    if (!response.ok) throw new Error(`创建房间失败：HTTP ${response.status}`);
+    if (!response.ok) throw new Error(t('web.createFailed', { status: response.status }));
     navigateToRoom(navigation, `/r/${newRoomId}#k=${base64Url(secret)}`);
   } catch (err) {
     cancelRoomNavigation(navigation);
@@ -869,7 +930,7 @@ function createCodeRoom() {
   if (!cryptoReady.value || codeBusy.value) return;
   const code = normalizeCode(customCode.value);
   if (customCode.value.trim() && !isValidCode(code)) {
-    notice.value = "群聊码可用 4-32 位 A-Z 和 0-9。";
+    notice.value = t('web.invalidCode');
     return;
   }
   const navigation = beginRoomNavigation();
@@ -883,7 +944,7 @@ function joinCodeRoom() {
   if (codeBusy.value) return;
   const code = normalizeCode(joinCode.value);
   if (!isValidCode(code)) {
-    notice.value = "群聊码可用 4-32 位 A-Z 和 0-9。";
+    notice.value = t('web.invalidCode');
     return;
   }
   const navigation = beginRoomNavigation();
@@ -907,9 +968,9 @@ async function requestCodeRoom(method, code = "", navigation = null) {
     });
     if (response.status === 429) {
       const retryAfter = Number(response.headers.get("Retry-After") || 60);
-      throw new Error(`群聊码请求太频繁，请约 ${Math.max(1, Math.ceil(retryAfter))} 秒后再试。`);
+      throw new Error(t('web.codeRateLimited', { seconds: Math.max(1, Math.ceil(retryAfter)) }));
     }
-    if (!response.ok) throw new Error(`群聊码请求失败：HTTP ${response.status}`);
+    if (!response.ok) throw new Error(t('web.codeRequestFailed', { status: response.status }));
     const payload = await response.json();
     navigateToRoom(navigation, payload.url);
   } finally {
@@ -924,7 +985,7 @@ function normalizedRoomMaxClients() {
 
 async function solvePowChallenge() {
   const response = await fetch("/api/pow-challenge?purpose=code");
-  if (!response.ok) throw new Error(`PoW challenge 失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(t('web.powFailed', { status: response.status }));
   const payload = await response.json();
   const encoder = new TextEncoder();
   let counter = 0;
@@ -993,7 +1054,7 @@ function connectEvents() {
   transport.value?.close();
   transport.value = null;
   transportMode.value = "";
-  connectionState.value = "连接中";
+  connectionState.value = t('web.connecting');
 
   let settled = false;
   let wsTransport = null;
@@ -1006,6 +1067,13 @@ function connectEvents() {
 
   wsTransport = createWebSocketTransport({
     epoch,
+    onRejected: () => {
+      if (settled || epoch !== sessionEpoch) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
+      connectionState.value = t('core.status.disconnected');
+      notice.value = t('web.roomUnavailable');
+    },
     onReady: () => {
       if (settled) return;
       settled = true;
@@ -1013,7 +1081,7 @@ function connectEvents() {
       cancelWSRecovery(false);
       transport.value = wsTransport;
       transportMode.value = "ws";
-      connectionState.value = "已连接";
+      connectionState.value = t('web.connected');
       sendHello().catch(showError);
     },
     onFallback: () => {
@@ -1044,13 +1112,13 @@ function startSSETransport(epoch = sessionEpoch, resetRecovery = true) {
       if (epoch !== sessionEpoch) return;
       transport.value = sseTransport;
       transportMode.value = "sse";
-      connectionState.value = "已连接（兼容模式）";
+      connectionState.value = t('web.compatible');
       sendHello().catch(showError);
       if (resetRecovery) startWSRecovery(epoch);
     },
     onEvent: dispatchWireEvent,
     onState: (state) => {
-      if (transport.value === sseTransport) connectionState.value = state;
+      if (epoch === sessionEpoch && (!transport.value || transport.value === sseTransport)) connectionState.value = state;
     },
   });
 }
@@ -1083,7 +1151,7 @@ function attemptWSRecovery(epoch = wsRecovery.epoch) {
   if (epoch !== sessionEpoch || transportMode.value !== "sse" || wsRecovery.probe || pendingWSUpgrade) return;
   if (navigator.onLine === false) return;
   wsRecovery.lastAttemptAt = Date.now();
-  connectionState.value = "已连接（兼容模式，正在尝试 WebSocket）";
+  connectionState.value = t('web.compatibleTryingWs');
 
   const probe = { epoch, transport: null, settled: false };
   const fail = () => finishWSProbeFailure(probe);
@@ -1097,7 +1165,7 @@ function attemptWSRecovery(epoch = wsRecovery.epoch) {
       wsRecovery.probe = null;
       if (activeSendOperations > 0) {
         pendingWSUpgrade = probe;
-        connectionState.value = "已连接（兼容模式，WebSocket 就绪）";
+        connectionState.value = t('web.compatibleWsReady');
         return;
       }
       promoteWSProbe(probe);
@@ -1118,7 +1186,7 @@ function finishWSProbeFailure(probe) {
   wsRecovery.probe = null;
   probe.transport?.close();
   if (probe.epoch !== sessionEpoch || transportMode.value !== "sse") return;
-  connectionState.value = "已连接（兼容模式）";
+  connectionState.value = t('web.compatible');
   wsRecovery.failures += 1;
   const delay = wsRetryDelaysMs[Math.min(wsRecovery.failures, wsRetryDelaysMs.length - 1)];
   scheduleWSRecovery(delay, probe.epoch);
@@ -1133,7 +1201,7 @@ function promoteWSProbe(probe) {
   const oldTransport = transport.value;
   transport.value = probe.transport;
   transportMode.value = "ws";
-  connectionState.value = "已连接";
+  connectionState.value = t('web.connected');
   cancelWSRecovery(false);
   oldTransport?.close();
   sendHello().catch(showError);
@@ -1146,7 +1214,27 @@ function wakeWSRecovery() {
 }
 
 function handleVisibilityRecovery() {
-  if (document.visibilityState === "visible") wakeWSRecovery();
+  if (document.visibilityState === "visible") {
+    wakeWSRecovery();
+  } else {
+    handlePageBlur();
+  }
+}
+
+function handlePageFocus() {
+  if (privacyLocked.value) return;
+  // Background tabs may throttle or suspend retention timers. Always prune
+  // against wall-clock time before making any messages visible again.
+  pageMessagesVisible.value = false;
+  pruneMessages(Date.now());
+  pageMessagesVisible.value = document.visibilityState === "visible";
+  if (pageMessagesVisible.value) scrollMessages();
+}
+
+function handlePageBlur() {
+  pageMessagesVisible.value = false;
+  closeImagePreview();
+  finalizeImagePreviewClose();
 }
 
 function cancelWSRecovery(closeProbe = true) {
@@ -1163,7 +1251,7 @@ function cancelWSRecovery(closeProbe = true) {
   pendingWSUpgrade = null;
 }
 
-function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState }) {
+function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState, onRejected }) {
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   const url = `${scheme}://${location.host}/api/rooms/${encodeURIComponent(roomId.value)}/ws?client_id=${encodeURIComponent(deviceId.value)}`;
   const socket = new WebSocket(url);
@@ -1171,12 +1259,17 @@ function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState
   let ready = false;
   let closedByClient = false;
 
-  socket.addEventListener("open", () => onState("连接中"));
+  socket.addEventListener("open", () => onState(t('web.connecting')));
   socket.addEventListener("error", () => {
     if (!ready) onFallback();
   });
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
     if (epoch !== sessionEpoch) return;
+    if (closedByClient) return;
+    if (!ready && onRejected && event.code === 1013 && ["room not found", "room expired"].includes(event.reason)) {
+      onRejected();
+      return;
+    }
     if (!ready) {
       onFallback();
       return;
@@ -1184,7 +1277,7 @@ function createWebSocketTransport({ epoch, onReady, onFallback, onEvent, onState
     if (!closedByClient) {
       transport.value = null;
       transportMode.value = "";
-      onState("重连中");
+      onState(t('web.reconnecting'));
       startSSETransport(epoch);
     }
   });
@@ -1223,8 +1316,8 @@ function createSSETransport({ epoch, onOpen, onEvent, onState }) {
   const url = `/api/rooms/${encodeURIComponent(roomId.value)}/events?client_id=${encodeURIComponent(deviceId.value)}&connection_token=${encodeURIComponent(connectionToken)}`;
   const source = new EventSource(url);
   source.addEventListener("open", () => epoch === sessionEpoch && onOpen());
-  source.addEventListener("error", () => epoch === sessionEpoch && onState("重连中（兼容模式）"));
-  source.addEventListener("ping", () => epoch === sessionEpoch && onState("已连接（兼容模式）"));
+  source.addEventListener("error", () => epoch === sessionEpoch && onState(t('web.compatibleReconnecting')));
+  source.addEventListener("ping", () => epoch === sessionEpoch && onState(t('web.compatible')));
   source.addEventListener("message", (event) => {
     if (epoch !== sessionEpoch) return;
     try {
@@ -1275,13 +1368,19 @@ async function handleWireEvent(event) {
   if (event.type === "hello" || event.type === "peer_hello") {
     if (!verifyHelloEvent(event)) return;
   } else if (requiresPeerSignature(event.type)) {
-    if (!verifyPeerEvent(event)) return;
+    const verification = verifyPeerEvent(event);
+    if (verification === "pending") {
+      queuePendingAuthenticatedPeerEvent(event);
+      return;
+    }
+    if (!verification) return;
   }
 
   switch (event.type) {
     case "hello":
       if (event.from === deviceId.value) return;
       if (!rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation)) return;
+      await flushPendingAuthenticatedPeerEvents(event.from);
       await sendSignedEvent({
         type: "peer_hello",
         room: roomId.value,
@@ -1297,7 +1396,9 @@ async function handleWireEvent(event) {
       break;
     case "peer_hello":
       if (event.to !== deviceId.value || event.from === deviceId.value) return;
-      rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation);
+      if (rememberPeer(event.from, event.public_key, event.display_name, event.sign_public_key, event.sender_key_id, event.key_generation)) {
+        await flushPendingAuthenticatedPeerEvents(event.from);
+      }
       break;
     case "peer_leave":
       forgetPeer(event.from);
@@ -1362,13 +1463,20 @@ function forgetPeer(id) {
   const next = new Map(peers.value);
   next.delete(id);
   peers.value = next;
+  clearPendingAuthenticatedPeerEvents(id);
   if (known && activeRotation) abortRotation(activeRotation.id).catch(showError);
   if (selectedPeer.value === id) {
     const offline = new Map(offlinePrivatePeers.value);
     offline.set(id, known || offline.get(id) || { name: shortId(id) });
     offlinePrivatePeers.value = offline;
-    addSystemMessage(`${displayNameFor(id)} 已断开，当前私聊已暂停。请重新选择私聊对象或切回群聊。`);
+    addSystemMessage(t('web.peerDisconnected', { name: displayNameFor(id) }));
   }
+}
+
+function handleSendEnter(event) {
+  if (event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  sendMessage();
 }
 
 async function sendMessage() {
@@ -1787,6 +1895,7 @@ function expireLocalRoom() {
   boxKeyHistory.clear();
   peerIdentityPins.clear();
   seenAuthenticatedEvents.clear();
+  clearPendingAuthenticatedPeerEvents();
   if (identityStorageKey) sessionStorage.removeItem(identityStorageKey);
   sessionStorage.removeItem(`e2ee-chat-device:${roomId.value}`);
   location.replace("/");
@@ -2060,7 +2169,9 @@ async function handleKeyEvent(event) {
     activeRotation = null;
     return;
   }
-  if (event.type === "device_key_update") applyDeviceKeyUpdate(event);
+  if (event.type === "device_key_update" && applyDeviceKeyUpdate(event)) {
+    await flushPendingAuthenticatedPeerEvents(event.from);
+  }
 }
 
 async function commitRotation() {
@@ -2132,14 +2243,71 @@ function verifyHelloEvent(event) {
 }
 
 function verifyPeerEvent(event) {
+  const pinnedPeer = peers.value.get(event.from) || peerIdentityPins.get(event.from);
   const peer = signingIdentityForEvent(event, {
     ownDeviceId: deviceId.value,
     ownSignPublicKey: signingKeyPair.value?.publicKey,
     ownKeyGeneration: keyGeneration,
-    peer: peers.value.get(event.from) || peerIdentityPins.get(event.from),
+    peer: pinnedPeer,
   });
-  if (!peer || !sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey)) return false;
+  if (!peer) {
+    const generation = Number(event.key_generation);
+    if (event.protocol !== PROTOCOL_VERSION || !pinnedPeer?.signPublicKey || !event.signature || !event.event_id ||
+        !Number.isInteger(generation) || generation <= Number(pinnedPeer.keyGeneration || 0) ||
+        !sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), pinnedPeer.signPublicKey)) {
+      return false;
+    }
+    return "pending";
+  }
+  if (!sodium.crypto_sign_verify_detached(asBytes(event.signature), canonicalEventBytes({ ...event, signature: undefined }), peer.signPublicKey)) return false;
   return rememberAuthenticatedEvent(event);
+}
+
+function queuePendingAuthenticatedPeerEvent(event) {
+  const replayId = authenticatedEventReplayKey(event);
+  if (!replayId || seenAuthenticatedEvents.has(replayId) || pendingAuthenticatedPeerEventIds.has(replayId)) return;
+  prunePendingAuthenticatedPeerEvents();
+  const pending = pendingAuthenticatedPeerEvents.get(event.from) || [];
+  if (pending.length >= maxPendingAuthenticatedPeerEventsPerPeer || pendingAuthenticatedPeerEventCount >= maxPendingAuthenticatedPeerEvents) return;
+  pending.push({ event, replayId, receivedAt: Date.now() });
+  pendingAuthenticatedPeerEvents.set(event.from, pending);
+  pendingAuthenticatedPeerEventIds.add(replayId);
+  pendingAuthenticatedPeerEventCount += 1;
+}
+
+async function flushPendingAuthenticatedPeerEvents(peerId) {
+  const pending = pendingAuthenticatedPeerEvents.get(peerId) || [];
+  pendingAuthenticatedPeerEvents.delete(peerId);
+  for (const item of pending) {
+    pendingAuthenticatedPeerEventIds.delete(item.replayId);
+    pendingAuthenticatedPeerEventCount -= 1;
+    if (Date.now() - item.receivedAt <= pendingAuthenticatedPeerEventTtlMs) await handleWireEvent(item.event);
+  }
+}
+
+function prunePendingAuthenticatedPeerEvents(now = Date.now()) {
+  for (const [peerId, pending] of pendingAuthenticatedPeerEvents) {
+    const retained = pending.filter((item) => {
+      if (now - item.receivedAt <= pendingAuthenticatedPeerEventTtlMs) return true;
+      pendingAuthenticatedPeerEventIds.delete(item.replayId);
+      pendingAuthenticatedPeerEventCount -= 1;
+      return false;
+    });
+    if (retained.length) pendingAuthenticatedPeerEvents.set(peerId, retained);
+    else pendingAuthenticatedPeerEvents.delete(peerId);
+  }
+}
+
+function clearPendingAuthenticatedPeerEvents(peerId = "") {
+  const peerIds = peerId ? [peerId] : [...pendingAuthenticatedPeerEvents.keys()];
+  for (const id of peerIds) {
+    for (const item of pendingAuthenticatedPeerEvents.get(id) || []) {
+      pendingAuthenticatedPeerEventIds.delete(item.replayId);
+      pendingAuthenticatedPeerEventCount -= 1;
+    }
+    pendingAuthenticatedPeerEvents.delete(id);
+  }
+  if (!peerId) pendingAuthenticatedPeerEventCount = 0;
 }
 
 function rememberAuthenticatedEvent(event) {
@@ -2246,7 +2414,7 @@ function selectPeer(id) {
 function updateDisplayName() {
   const name = cleanName(displayName.value);
   if (!name) {
-    displayName.value = sessionStorage.getItem("e2ee-chat-display-name") || `访客${randomDigits(4)}`;
+    displayName.value = sessionStorage.getItem("e2ee-chat-display-name") || t('web.guest', { digits: randomDigits(4) });
     return;
   }
   displayName.value = name;
@@ -2332,7 +2500,7 @@ function onMessagePaste(event) {
 
 function setSelectedFile(file) {
   if (file.size > maxFileBytes) {
-    showError(new Error(`文件不能超过 ${formatBytes(maxFileBytes)}。`));
+    showError(new Error(t('web.fileTooLarge', { size: formatBytes(maxFileBytes) })));
     if (fileInputRef.value) fileInputRef.value.value = "";
     return;
   }
@@ -2380,9 +2548,9 @@ function scrollMessages() {
 
 function messageLabel(message) {
   if (message.privateTo) {
-    return `${displayNameFor(message.from)} 私信${message.mine ? `给 ${displayNameFor(message.privateTo)}` : ""}`;
+  return t('web.privateChat', { name: displayNameFor(message.from), to: message.mine ? ` ${t('web.sendPrivate', { name: displayNameFor(message.privateTo) })}` : '' });
   }
-  return `${displayNameFor(message.from)} 群聊`;
+  return t('web.groupMessage', { name: displayNameFor(message.from) });
 }
 
 function messageStyle(message) {
@@ -2455,22 +2623,22 @@ function hashString(value) {
 async function copyInvite() {
   const relativeInvite = `${location.pathname.replace(/^\/+/, "")}${location.hash}`;
   await navigator.clipboard.writeText(relativeInvite);
-  addSystemMessage("已复制邀请链接");
+  addSystemMessage(t('web.inviteCopied'));
 }
 
 async function copySafety() {
   await navigator.clipboard.writeText(safetyCode.value);
-  addSystemMessage("已复制唯一码");
+  addSystemMessage(t('web.safetyCopied'));
 }
 
 async function copyCodeBlock(text) {
   await navigator.clipboard.writeText(text || "");
-  addSystemMessage("已复制代码块");
+  addSystemMessage(t('web.codeCopied'));
 }
 
 async function toggleNotifications() {
   if (!notificationSupported()) {
-    notice.value = "当前浏览器不支持系统通知。";
+    notice.value = t('web.notificationsUnsupported');
     return;
   }
   if (notificationsEnabled.value) {
@@ -2487,7 +2655,7 @@ async function toggleNotifications() {
   if (permission !== "granted") {
     notificationsEnabled.value = false;
     localStorage.removeItem("e2ee-chat-notifications");
-    notice.value = "系统通知权限未开启，无法发送浏览器通知。";
+    notice.value = t('web.notificationsDenied');
     return;
   }
   notificationsEnabled.value = true;
@@ -2498,7 +2666,7 @@ function notifyIncomingMessage() {
   if (!notificationsEnabled.value || !notificationSupported() || Notification.permission !== "granted") return;
   try {
     notificationSeq += 1;
-    new Notification("您收到一条信息", {
+    new Notification(t('web.notifyReceived'), {
       tag: `e2ee-chat-${roomId.value}-${Date.now()}-${notificationSeq}`,
       body: "",
     });
@@ -2623,7 +2791,7 @@ function openImagePreview(file) {
   if (!isImageFile(file)) return;
   resetImagePreviewTransform();
   imagePreviewUrl.value = fileObjectUrl(file);
-  imagePreviewName.value = file.name || "图片";
+  imagePreviewName.value = file.name || t('web.image');
   imagePreviewVisible.value = true;
 }
 
@@ -2749,6 +2917,8 @@ function shortId(id) {
 </script>
 
 <style scoped>
+.home-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-trigger { font-size: 24px; flex-shrink: 0; }
 .shell {
   height: 100vh;
   height: 100dvh;

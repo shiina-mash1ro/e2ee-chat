@@ -1,4 +1,5 @@
 export const CHANNEL_NAME = "e2ee-chat-global-v1";
+import { t } from "../../src/i18n.js";
 
 export function createClientChannel(kind, onMessage) {
   const instanceId = crypto.randomUUID();
@@ -12,7 +13,7 @@ export function createClientChannel(kind, onMessage) {
     if (message.requestId && pending.has(message.requestId)) {
       const job = pending.get(message.requestId);
       pending.delete(message.requestId);
-      message.ok ? job.resolve(message.result) : job.reject(new Error(message.error || "操作失败"));
+      message.ok ? job.resolve(message.result) : job.reject(new Error(message.error || t("core.error.operationFailed")));
     }
     onMessage?.(message);
   };
@@ -27,7 +28,7 @@ export function createClientChannel(kind, onMessage) {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(requestId);
-          reject(new Error("聊天核心响应超时"));
+          reject(new Error(t("core.error.coreTimeout")));
         }, 60000);
         pending.set(requestId, {
           resolve: (value) => { clearTimeout(timer); resolve(value); },
@@ -40,7 +41,7 @@ export function createClientChannel(kind, onMessage) {
       clearInterval(heartbeat);
       send("bye");
       channel.close();
-      for (const job of pending.values()) job.reject(new Error("窗口已关闭"));
+      for (const job of pending.values()) job.reject(new Error(t("core.error.windowClosed")));
       pending.clear();
     },
   };
@@ -48,5 +49,5 @@ export function createClientChannel(kind, onMessage) {
 
 export async function ensureCore() {
   const response = await chrome.runtime.sendMessage({ type: "ensure-core" });
-  if (!response?.ok) throw new Error(response?.error || "无法启动聊天核心");
+  if (!response?.ok) throw new Error(response?.error || t("core.error.startCore"));
 }
