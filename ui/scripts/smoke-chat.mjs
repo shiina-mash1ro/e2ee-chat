@@ -129,7 +129,11 @@ async function runLanguageSmoke() {
     const devices = await page.evaluate(() => Object.entries(sessionStorage).filter(([key]) => key.startsWith("e2ee-chat-device:")));
     const draft = "草稿 preserved 日本語 العربية <not markup>";
     await page.getByPlaceholder("输入消息").fill(draft);
-    await page.locator(".meta select.language-select").selectOption("en");
+    if (await page.locator('.chat .language-select, .chat .privacy-controls, .room-actions .n-switch').count()) throw new Error('room preferences leaked outside settings');
+    await openPreferences(page);
+    await page.locator('.preferences-dialog').getByRole('button', { name: '通知关', exact: true }).waitFor();
+    await page.locator(".preferences-dialog select.language-select").selectOption("en");
+    await closePreferences(page);
     if (await page.getByPlaceholder(catalogs.en["web.messagePlaceholder"]).inputValue() !== draft || page.url() !== url) throw new Error("room changed or draft lost on language switch");
     const after = await page.evaluate(() => Object.entries(sessionStorage).filter(([key]) => key.startsWith("e2ee-chat-device:")));
     if (JSON.stringify(after) !== JSON.stringify(devices)) throw new Error("language switch changed device identity");

@@ -23,24 +23,11 @@
             </n-space>
           </n-modal>
 
-          <n-card v-if="!roomId" class="home" :bordered="true">
-            <n-space vertical :size="18">
-              <div class="home-heading">
-                <h1>{{ t('web.title') }}</h1>
-                <n-button class="settings-trigger" quaternary circle :aria-label="t('ext.settings')" :title="t('ext.settings')" @click="settingsVisible = true"><span aria-hidden="true">⚙</span></n-button>
-              </div>
-              <n-alert
-                v-if="notice"
-                class="notice"
-                type="error"
-                :bordered="false"
-                closable
-                @close="notice = ''"
-              >
-                {{ t(notice) }}
-              </n-alert>
               <n-modal v-model:show="settingsVisible" preset="card" class="preferences-dialog" :title="t('ext.settings')" :style="{ width: 'min(460px, calc(100vw - 32px))' }">
               <n-space vertical :size="20">
+              <div v-if="roomId" class="theme-control">
+                <n-button :type="notificationsEnabled ? 'primary' : 'default'" @click="toggleNotifications">{{ notificationButtonText }}</n-button>
+              </div>
               <div class="theme-control">
                 <span>{{ t('web.language') }}</span>
                 <select :value="localePreference" :aria-label="t('web.language')" class="language-select" @change="changeLocale($event.target.value)">
@@ -67,6 +54,22 @@
               </div>
               </n-space>
               </n-modal>
+          <n-card v-if="!roomId" class="home" :bordered="true">
+            <n-space vertical :size="18">
+              <div class="home-heading">
+                <h1>{{ t('web.title') }}</h1>
+                <n-button class="settings-trigger" quaternary circle :aria-label="t('ext.settings')" :title="t('ext.settings')" @click="settingsVisible = true"><span aria-hidden="true">⚙</span></n-button>
+              </div>
+              <n-alert
+                v-if="notice"
+                class="notice"
+                type="error"
+                :bordered="false"
+                closable
+                @close="notice = ''"
+              >
+                {{ t(notice) }}
+              </n-alert>
               <div class="room-limit-control">
                 <span>{{ t('web.maxClients') }}</span>
                 <n-input-number v-model:value="roomMaxClients" :min="2" :max="100" :precision="0" size="small" :placeholder="t('web.maxClients')" />
@@ -113,13 +116,7 @@
               <div class="room-actions">
                 <n-button class="mobile-only" size="small" @click="memberDrawerVisible = true">{{ t('web.members') }}</n-button>
                 <n-button class="mobile-only" size="small" @click="detailVisible = true">{{ t('web.details') }}</n-button>
-                <n-button size="small" :type="notificationsEnabled ? 'primary' : 'default'" @click="toggleNotifications">
-                  {{ notificationButtonText }}
-                </n-button>
-                <n-switch v-model:value="darkMode" size="small">
-                  <template #checked>{{ t('web.on') }}</template>
-                  <template #unchecked>{{ t('web.off') }}</template>
-                </n-switch>
+                <n-button class="settings-trigger" quaternary circle :aria-label="t('ext.settings')" :title="t('ext.settings')" @click="settingsVisible = true"><span aria-hidden="true">⚙</span></n-button>
                 <n-button class="desktop-only" size="small" @click="copyInvite">{{ t('web.copyInvite') }}</n-button>
                 <n-button class="desktop-only" size="small" @click="copySafety">{{ t('web.copySafety') }}</n-button>
               </div>
@@ -137,10 +134,6 @@
             </n-alert>
 
             <div class="meta">
-              <div v-if="privacyGuard?.desktop" class="privacy-controls">
-                <span>{{ t('privacy.title') }}</span><n-switch :value="privacyGuard.enabled" :aria-label="t('privacy.title')" @update:value="privacyGuard.toggle" />
-                <n-button size="small" @click="privacyGuard.openSettings()">{{ t('privacy.settings') }}</n-button>
-              </div>
               <div class="name-control">
                 <label class="meta-label">{{ t('web.myName') }}</label>
                 <n-input
@@ -165,19 +158,9 @@
                 <span>{{ t('web.status') }}</span>
                 <strong>{{ t(connectionState) }}</strong>
               </div>
-              <div class="meta-pill">
-                <span>{{ t('web.language') }}</span>
-                <select :value="localePreference" :aria-label="t('web.language')" class="language-select" @change="changeLocale($event.target.value)">
-                  <option v-for="option in localeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </select>
-              </div>
             </div>
 
             <section v-if="detailVisible" class="room-detail">
-              <div v-if="privacyGuard?.desktop" class="privacy-controls">
-                <span>{{ t('privacy.title') }}</span><n-switch :value="privacyGuard.enabled" :aria-label="t('privacy.title')" @update:value="privacyGuard.toggle" />
-                <n-button size="small" @click="privacyGuard.openSettings()">{{ t('privacy.settings') }}</n-button>
-              </div>
               <div class="detail-head">
                 <h2>{{ roomId }}</h2>
                 <n-button size="small" @click="detailVisible = false">{{ t('web.backToChat') }}</n-button>
@@ -203,9 +186,6 @@
               <div class="detail-actions">
                 <n-button @click="copyInvite">{{ t('web.copyInvite') }}</n-button>
                 <n-button @click="copySafety">{{ t('web.copySafety') }}</n-button>
-                <select :value="localePreference" :aria-label="t('web.language')" class="language-select" @change="changeLocale($event.target.value)">
-                  <option v-for="option in localeOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                </select>
               </div>
             </section>
 
@@ -502,6 +482,7 @@ const privacyLocked = ref(false);
 function onPrivacyLock(value) {
   privacyLocked.value = value;
   if (value) {
+    settingsVisible.value = false;
     handlePageBlur();
     detailVisible.value = false;
     memberDrawerVisible.value = false;
